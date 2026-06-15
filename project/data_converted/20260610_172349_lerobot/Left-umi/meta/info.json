@@ -1,0 +1,128 @@
+{
+  "codebase_version": "v3.0",
+  "robot_type": "orbbec_uin_gripper",
+  "total_episodes": 1,
+  "total_frames": 145,
+  "total_tasks": 1,
+  "chunks_size": 1000,
+  "fps": 30.0,
+  "splits": {
+    "train": "0:1"
+  },
+  "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+  "features": {
+    "observation.images.cam": {
+      "dtype": "video",
+      "shape": [
+        720,
+        1280,
+        3
+      ],
+      "names": [
+        "height",
+        "width",
+        "channels"
+      ],
+      "video_info": {
+        "video.fps": 30.0,
+        "video.codec": "avc1",
+        "video.pix_fmt": "yuv420p",
+        "video.is_depth_map": false,
+        "has_audio": false
+      }
+    },
+    "observation.state": {
+      "dtype": "float32",
+      "shape": [
+        6
+      ],
+      "names": {
+        "sensors": [
+          "accel_x",
+          "accel_y",
+          "accel_z",
+          "gyro_x",
+          "gyro_y",
+          "gyro_z"
+        ]
+      },
+      "fps": 30.0
+    },
+    "action": {
+      "dtype": "float32",
+      "shape": [
+        7
+      ],
+      "names": {
+        "motors": [
+          "delta_joint_0",
+          "delta_joint_1",
+          "delta_joint_2",
+          "delta_joint_3",
+          "delta_joint_4",
+          "delta_joint_5",
+          "gripper"
+        ]
+      },
+      "fps": 30.0
+    },
+    "timestamp": {
+      "dtype": "float32",
+      "shape": [
+        1
+      ],
+      "names": null,
+      "fps": 30.0
+    },
+    "episode_index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null,
+      "fps": 30.0
+    },
+    "frame_index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null,
+      "fps": 30.0
+    },
+    "next.reward": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null,
+      "fps": 30.0
+    },
+    "next.done": {
+      "dtype": "bool",
+      "shape": [
+        1
+      ],
+      "names": null,
+      "fps": 30.0
+    },
+    "index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null,
+      "fps": 30.0
+    },
+    "task_index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null,
+      "fps": 30.0
+    }
+  },
+  "slot": "Left-umi",
+  "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+}

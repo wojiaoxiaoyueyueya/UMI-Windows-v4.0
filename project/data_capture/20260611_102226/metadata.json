@@ -1,0 +1,124 @@
+{
+  "sessionId": "20260611_102226",
+  "startTimeUs": 1781144546478466,
+  "timeBase": {"timestamp_us": "system_epoch_us", "session_time_us": "timestamp_us - startTimeUs", "sync": "all recorded CSV files share session_time_us for alignment"},
+  "slots": {
+    "Head-umi": {
+      "position": "head",
+      "deviceType": "hikvision",
+      "frameCount": {"color": 186},
+      "gripperCount": 0,
+      "firstVideoDeviceTimestampUs": 1781144546509067,
+      "firstVideoSessionTimeUs": 30601,
+      "recordingStartToFirstVideoOffsetUs": 30601,
+      "deviceToSystemOffsetUs": 0,
+      "videos": {
+        "color": {
+          "format": "BGR",
+          "width": 1280,
+          "height": 720,
+          "frames": 186,
+          "firstTimestampUs": 1781144546509067,
+          "firstSessionTimeUs": 30601,
+          "actualFps": 29.76,
+          "durationSec": 6.217,
+          "lastSessionTimeUs": 6204766,
+          "timestampFile": "color_video/timestamps.csv",
+          "file": "color_video/color.mp4"
+        }
+      },
+      "gripper": {"file": "gripper_data/gripper.csv", "frames": 0}
+    },
+    "Left-umi": {
+      "position": "left",
+      "deviceType": "orbbec",
+      "frameCount": {"color": 373, "depth": 373, "ir-left": 373, "ir-right": 373},
+      "gripperCount": 309,
+      "firstVideoDeviceTimestampUs": 1781144546487238,
+      "firstVideoSessionTimeUs": 8772,
+      "recordingStartToFirstVideoOffsetUs": 8772,
+      "deviceToSystemOffsetUs": 0,
+      "videos": {
+        "color": {
+          "format": "BGR",
+          "width": 640,
+          "height": 480,
+          "frames": 373,
+          "firstTimestampUs": 1781144546487238,
+          "firstSessionTimeUs": 8772,
+          "actualFps": 59.83,
+          "durationSec": 6.217,
+          "lastSessionTimeUs": 6203439,
+          "timestampFile": "color_video/timestamps.csv",
+          "file": "color_video/color.mp4"
+        },
+        "depth": {
+          "format": "Y16",
+          "width": 640,
+          "height": 480,
+          "frames": 373,
+          "firstTimestampUs": 1781144546488511,
+          "firstSessionTimeUs": 10045,
+          "actualFps": 59.83,
+          "durationSec": 6.217,
+          "lastSessionTimeUs": 6204631,
+          "timestampFile": "depth_video/timestamps.csv",
+          "file": "depth_video/depth.mp4"
+        },
+        "ir-left": {
+          "format": "Y8",
+          "width": 640,
+          "height": 480,
+          "frames": 373,
+          "firstTimestampUs": 1781144546489822,
+          "firstSessionTimeUs": 11356,
+          "actualFps": 59.83,
+          "durationSec": 6.217,
+          "lastSessionTimeUs": 6205541,
+          "timestampFile": "ir-left_video/timestamps.csv",
+          "file": "ir-left_video/ir-left.mp4"
+        },
+        "ir-right": {
+          "format": "Y8",
+          "width": 640,
+          "height": 480,
+          "frames": 373,
+          "firstTimestampUs": 1781144546490743,
+          "firstSessionTimeUs": 12277,
+          "actualFps": 59.83,
+          "durationSec": 6.217,
+          "lastSessionTimeUs": 6206188,
+          "timestampFile": "ir-right_video/timestamps.csv",
+          "file": "ir-right_video/ir-right.mp4"
+        }
+      },
+      "gripper": {"file": "gripper_data/gripper.csv", "frames": 309, "minPosition": 0.022327, "maxPosition": 0.023186}
+    },
+    "Right-umi": {
+      "position": "right",
+      "deviceType": "hikvision",
+      "frameCount": {"color": 186},
+      "gripperCount": 309,
+      "firstVideoDeviceTimestampUs": 1781144546497952,
+      "firstVideoSessionTimeUs": 19486,
+      "recordingStartToFirstVideoOffsetUs": 19486,
+      "deviceToSystemOffsetUs": 0,
+      "videos": {
+        "color": {
+          "format": "BGR",
+          "width": 1280,
+          "height": 720,
+          "frames": 186,
+          "firstTimestampUs": 1781144546497952,
+          "firstSessionTimeUs": 19486,
+          "actualFps": 29.76,
+          "durationSec": 6.217,
+          "lastSessionTimeUs": 6188328,
+          "timestampFile": "color_video/timestamps.csv",
+          "file": "color_video/color.mp4"
+        }
+      },
+      "gripper": {"file": "gripper_data/gripper.csv", "frames": 309, "minPosition": 0.000000, "maxPosition": 0.000000}
+    }
+  }
+}

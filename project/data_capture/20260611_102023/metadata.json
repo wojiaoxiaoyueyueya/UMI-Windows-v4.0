@@ -1,0 +1,17 @@
+{
+  "sessionId": "20260611_102023",
+  "startTimeUs": 1781144423615310,
+  "timeBase": {"timestamp_us": "system_epoch_us", "session_time_us": "timestamp_us - startTimeUs", "sync": "all recorded CSV files share session_time_us for alignment"},
+  "slots": {
+    "Right-umi": {
+      "position": "right",
+      "deviceType": "hikvision",
+      "frameCount": {},
+      "gripperCount": 312,
+      "videos": {
+
+      },
+      "gripper": {"file": "gripper_data/gripper.csv", "frames": 312, "minPosition": 0.000000, "maxPosition": 0.018036}
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "format": "rlds",
+  "version": "v0.1",
+  "sessionId": "20260610_172349",
+  "fps": 30.0,
+  "totalFrames": 145,
+  "totalEpisodes": 1,
+  "stateDim": 0,
+  "actionDim": 7,
+  "hasIMU": false,
+  "hasGripper": false,
+  "hasPose": false,
+  "videos": {
+    "color": {
+      "width": 1280,
+      "height": 720,
+      "frames": 145,
+      "file": "color.mp4"
+    }
+  },
+  "slotPosition": "left",
+  "deviceType": "hikvision"
+}

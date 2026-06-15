@@ -1,0 +1,23 @@
+{
+  "format": "lerobot",
+  "version": "v3.0",
+  "sessionId": "20260611_102226",
+  "fps": 30.0,
+  "totalFrames": 186,
+  "totalEpisodes": 1,
+  "hasIMU": false,
+  "hasGripper": true,
+  "hasPose": false,
+  "frameCount": {
+    "color": 186
+  },
+  "videos": {
+    "color": {
+      "width": 1280,
+      "height": 720,
+      "frames": 186
+    }
+  },
+  "slot": "Right-umi",
+  "gripperCount": 309
+}

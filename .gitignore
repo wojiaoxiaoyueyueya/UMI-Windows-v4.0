@@ -1,51 +1,13 @@
-# Build outputs
-build/
-out/
-dist/
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-Makefile
-*.cmake
-*.ninja
-*.o
-*.obj
-*.obj.d
-*.a
-*.pdb
-*.ilk
-*.exp
-*.exe
+# Local/private configuration
+.env
+*.local
+config.local.json
 
-# Captured and converted datasets
-data_capture/
-data_converted/
-project/data_capture/
-project/data_converted/
-
-# Logs, caches, temporary files
-Log/
-project/Log/
-*.log
-crash.log
-__pycache__/
-*.py[cod]
-.pytest_cache/
-hello_out.txt
-hello_err.txt
-_history.txt
-
-# IDE and OS files
+# OS/editor scratch files
 .vs/
 .idea/
-.vscode/
 *.user
 *.suo
 *.swp
 .DS_Store
 Thumbs.db
-
-# Local/private configuration
-.env
-*.local
-config.local.json
