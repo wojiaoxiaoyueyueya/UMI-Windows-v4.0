@@ -1,3 +1,0 @@
-/home/yuezibo/linux-UMI/linux_ubuntu2204_port/project/build/CMakeFiles/ManualGripper.dir
-/home/yuezibo/linux-UMI/linux_ubuntu2204_port/project/build/CMakeFiles/edit_cache.dir
-/home/yuezibo/linux-UMI/linux_ubuntu2204_port/project/build/CMakeFiles/rebuild_cache.dir

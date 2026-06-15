@@ -1,4 +1,0 @@
-numpy
-pyarrow
-h5py
-crcmod
