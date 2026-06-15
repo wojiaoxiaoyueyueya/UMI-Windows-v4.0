@@ -50,17 +50,20 @@
 | `tools/convert_to_lerobot.py` | 原始会话转换为 LeRobot 数据集。 |
 | `tools/convert_to_hdf5.py` | 原始会话转换为 HDF5 数据集。 |
 | `tools/convert_to_rlds.py` | 原始会话转换为 RLDS/TFRecord 风格数据。 |
-| `collect_dlls.ps1` | 构建后补充收集运行 DLL。 |
-| `setup_orbbec_sdk.ps1` | Orbbec SDK 放置辅助脚本。 |
+| `../scripts/bootstrap_ubuntu2204.sh` | 安装 Ubuntu 22.04 系统依赖和 Python 依赖。 |
+| `../scripts/build_linux.sh` | 编译 Linux 后端程序，输出到 `project/build-linux/`。 |
+| `../scripts/run_linux.sh` | 设置 SDK 动态库路径并启动服务。 |
+| `../scripts/repair_sdk_links.sh` | 恢复 Orbbec SDK 的 Linux 软链接。 |
+| `../install_and_run_ubuntu2204.sh` | 新电脑一键安装、编译、运行入口。 |
 
 ## 第三方依赖目录
 
 | 路径 | 内容 |
 | --- | --- |
-| `lib/hikvision/` | 海康 MVS SDK 头文件、库和运行 DLL。 |
-| `lib/orbbec/` | Orbbec SDK 头文件、库和运行 DLL。 |
-| `lib/gcan/` | GCAN USBCAN 头文件和 DLL。 |
-| `lib/umi/` | UMI 夹爪驱动源码或兼容接口。 |
+| `third_party_sdk/hikvision/` | 海康 Linux MVS SDK 头文件和 `.so` 运行库。 |
+| `third_party_sdk/orbbec/` | Orbbec Linux SDK 头文件、`.so` 运行库和扩展库。 |
+| `third_party_sdk/gcan/` | GCAN 头文件和 Linux CAN 接入说明。 |
+| `third_party_sdk/umi/` | UMI 夹爪驱动源码或兼容接口。 |
 
 ## 数据目录
 
@@ -68,7 +71,7 @@
 | --- | --- | --- |
 | `data_capture/` | 原始采集会话。 | 不提交。 |
 | `data_converted/` | 转换后的训练数据。 | 不提交。 |
-| `build/` | exe、DLL、构建缓存和日志。 | 不提交。 |
+| `build/`、`build-linux/` | 可执行文件、构建缓存和日志。 | 不提交。 |
 
 ## 维护规则
 

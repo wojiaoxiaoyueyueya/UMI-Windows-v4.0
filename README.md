@@ -27,9 +27,12 @@
 
 ```text
 linux_ubuntu2204_port/
+├─ START_HERE.md            第一次使用请先看这个文件
+├─ install_and_run_ubuntu2204.sh
+│                           新电脑一键安装、编译、运行入口
 ├─ project/                 主程序源码、前端页面、配置和数据转换脚本
 │  ├─ include/              C++ 头文件
-│  ├─ src/                  C++ 后端源码
+│  ├─ src/                  C++ 后端源码，主入口为 src/main.cpp
 │  ├─ frontend/             Web 控制台、数据看板、说明页面
 │  ├─ tools/                LeRobot/HDF5/RLDS 转换脚本
 │  ├─ docs/                 部署和结构说明
@@ -54,6 +57,14 @@ cd UMI-linux
 如果是从 U 盘或压缩包拷贝，也请保证整个目录结构完整，不要只拷贝 `project/`。
 
 ## 从零部署
+
+最简单方式：
+
+```bash
+bash install_and_run_ubuntu2204.sh
+```
+
+如果脚本提示需要重新登录或重启，请完成后再次运行同一条命令。下面是手动分步方式。
 
 ### 1. 安装系统依赖
 
@@ -106,6 +117,17 @@ http://localhost:8080
 | 数据看板 | `http://localhost:8080/index.html` |
 | 采集控制台 | `http://localhost:8080/index_old.html` |
 | 项目说明 | `http://localhost:8080/info.html` |
+
+## 主程序入口
+
+GitHub 首页不会直接显示 `main.cpp`，因为本项目按工程结构放在 `project/` 目录下：
+
+```text
+project/src/main.cpp        C++ 主程序入口
+project/CMakeLists.txt      Linux 构建入口
+scripts/build_linux.sh      编译脚本
+scripts/run_linux.sh        运行脚本
+```
 
 ## 数据保存位置
 
