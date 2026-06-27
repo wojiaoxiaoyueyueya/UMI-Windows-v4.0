@@ -119,14 +119,12 @@ public:
     bool openDevice(DWORD deviceType, DWORD deviceIndex = 0) {
         if (!fn_OpenDevice) return false;
         DWORD ret = fn_OpenDevice(deviceType, deviceIndex, 0);
-        fprintf(stderr, "[CAN] OpenDevice ret=%lu (期望1)\n", ret);
         if (ret == 1) { // STATUS_OK = 1
             deviceType_ = deviceType;
             deviceIndex_ = deviceIndex;
             opened_ = true;
             return true;
         }
-        fprintf(stderr, "[CAN] OpenDevice 失败, ret=%lu\n", ret);
         return false;
     }
 
@@ -174,16 +172,13 @@ public:
         if (ret == 0) {
             // 发送失败，读取错误并尝试复位重发
             UINT errCode = readError();
-            printError(errCode);
             // 如果是总线错误(bus-off)，复位 CAN 后重试一次
             if (errCode & 0x0080) { // bus-off bit
-                fprintf(stderr, "[CAN] 检测到 bus-off，尝试复位...\n");
                 resetCAN();
                 Sleep(50);
                 ret = fn_Transmit(deviceType_, deviceIndex_, channel_,
                                    const_cast<ECAN_CAN_OBJ*>(&obj), 1);
                 if (ret > 0) {
-                    fprintf(stderr, "[CAN] 复位后重发成功, ID=0x%03X\n", obj.ID);
                     return true;
                 }
             }

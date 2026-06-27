@@ -74,7 +74,7 @@
                     <div id="cameraAssignPanel" style="font-size:11px;color:var(--text-dim)">检测中...</div>
                 </div>
                 <div class="sidebar-section">
-                    <button class="record-btn" id="swapCamerasBtn" style="width:100%;font-size:12px;padding:6px 0;">交换左右手摄像头</button>
+                    <button class="record-btn" id="swapCamerasBtn" style="width:100%;font-size:12px;padding:6px 0;">交换左右摄像头</button>
                     <button class="record-btn" id="toggleAllBtn" style="width:100%;font-size:12px;padding:6px 0;">一键全开</button>
                 </div>
                 <div class="sidebar-section sidebar-stats">
@@ -394,6 +394,7 @@
                         <span class="status-label">夹爪2 (右)</span>
                         <span class="status-value" id="gripConn2">未连接</span>
                     </div>
+                    <button class="record-btn" id="swapGrippersBtn" style="width:100%;font-size:12px;padding:6px 0;margin-top:8px;">交换左右手动夹爪</button>
                 </div>
                 <div class="sidebar-section">
                     <div class="sidebar-title">LED 控制</div>
@@ -463,6 +464,47 @@
                                 </div>
                             </div>
                         </div>
+                        <div class="manual-display-calibration">
+                            <div class="manual-v4-title">显示校准（只影响页面，不影响原始保存）</div>
+                            <div class="display-cal-grid">
+                                <label>最大张开=0% <input type="number" id="gripLeftCalOpen" data-display-cal-field="openRaw" data-display-cal-slot="left" step="0.1" placeholder="原始%"></label>
+                                <label>最小闭合=100% <input type="number" id="gripLeftCalClose" data-display-cal-field="closeRaw" data-display-cal-slot="left" step="0.1" placeholder="原始%"></label>
+                            </div>
+                            <div class="display-cal-actions">
+                                <button type="button" data-display-cal-fit="open" data-display-cal-slot="left">当前设为最大</button>
+                                <button type="button" data-display-cal-fit="close" data-display-cal-slot="left">当前设为最小</button>
+                                <button type="button" data-display-cal-fit="reset" data-display-cal-slot="left">重置</button>
+                            </div>
+                            <div class="display-cal-hint" id="gripLeftDisplayCalHint">原始闭合度 --，显示闭合度 --</div>
+                        </div>
+                        <div class="manual-telemetry-grid control-manual-telemetry">
+                            <span>协议 <b id="gripLeftProto">--</b></span>
+                            <span>帧长 <b id="gripLeftPayload">--</b></span>
+                            <span>设备 <b id="gripLeftDeviceId">--</b></span>
+                            <span>原始 <b id="gripLeftRaw">--</b></span>
+                            <span>IMU <b id="gripLeftImu">--</b></span>
+                            <span>力峰值 <b id="gripLeftForce">--</b></span>
+                        </div>
+                        <div class="manual-v4-panel control-manual-v4-panel" id="gripLeftV4Panel" style="display:none">
+                            <div class="manual-v4-title">UMI 2.0 单独查询与实时数据</div>
+                            <div class="manual-v4-grid">
+                                <span>磁编码 <b id="gripLeftMagnetic">--</b></span>
+                                <span>加速度 <b id="gripLeftAccel">--</b></span>
+                                <span>陀螺仪 <b id="gripLeftGyro">--</b></span>
+                                <span>LED <b id="gripLeftLedState">--</b></span>
+                                <span>发射端 <b id="gripLeftTxParam">--</b></span>
+                                <span>接收端 <b id="gripLeftRxParam">--</b></span>
+                                <span>最后响应 <b id="gripLeftLastCmd">--</b></span>
+                                <span>数据帧率 <b id="gripLeftFps">--</b></span>
+                                <span class="manual-v4-wide">力传感 <b id="gripLeftForceList">--</b></span>
+                            </div>
+                            <div class="manual-v4-actions">
+                                <button type="button" data-control-v4-slot="left" data-control-v4-action="v4_single_report">单次状态</button>
+                                <button type="button" data-control-v4-slot="left" data-control-v4-action="v4_read_params">读取参数</button>
+                                <button type="button" data-control-v4-slot="left" data-control-v4-action="v4_force_zero">力传感置零</button>
+                                <button type="button" data-control-v4-slot="left" data-control-v4-action="v4_start_stream">恢复连续</button>
+                            </div>
+                        </div>
                     </div>
                     <div class="collect-status-panel" style="flex:1;min-width:0">
                         <div class="status-header" style="display:flex;justify-content:space-between;align-items:center">
@@ -488,6 +530,47 @@
                                     <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">按键2</div>
                                     <div id="gripRightBtn2Big" style="display:inline-block;width:16px;height:16px;border-radius:50%;background:var(--bg-secondary)"></div>
                                 </div>
+                            </div>
+                        </div>
+                        <div class="manual-display-calibration">
+                            <div class="manual-v4-title">显示校准（只影响页面，不影响原始保存）</div>
+                            <div class="display-cal-grid">
+                                <label>最大张开=0% <input type="number" id="gripRightCalOpen" data-display-cal-field="openRaw" data-display-cal-slot="right" step="0.1" placeholder="原始%"></label>
+                                <label>最小闭合=100% <input type="number" id="gripRightCalClose" data-display-cal-field="closeRaw" data-display-cal-slot="right" step="0.1" placeholder="原始%"></label>
+                            </div>
+                            <div class="display-cal-actions">
+                                <button type="button" data-display-cal-fit="open" data-display-cal-slot="right">当前设为最大</button>
+                                <button type="button" data-display-cal-fit="close" data-display-cal-slot="right">当前设为最小</button>
+                                <button type="button" data-display-cal-fit="reset" data-display-cal-slot="right">重置</button>
+                            </div>
+                            <div class="display-cal-hint" id="gripRightDisplayCalHint">原始闭合度 --，显示闭合度 --</div>
+                        </div>
+                        <div class="manual-telemetry-grid control-manual-telemetry">
+                            <span>协议 <b id="gripRightProto">--</b></span>
+                            <span>帧长 <b id="gripRightPayload">--</b></span>
+                            <span>设备 <b id="gripRightDeviceId">--</b></span>
+                            <span>原始 <b id="gripRightRaw">--</b></span>
+                            <span>IMU <b id="gripRightImu">--</b></span>
+                            <span>力峰值 <b id="gripRightForce">--</b></span>
+                        </div>
+                        <div class="manual-v4-panel control-manual-v4-panel" id="gripRightV4Panel" style="display:none">
+                            <div class="manual-v4-title">UMI 2.0 单独查询与实时数据</div>
+                            <div class="manual-v4-grid">
+                                <span>磁编码 <b id="gripRightMagnetic">--</b></span>
+                                <span>加速度 <b id="gripRightAccel">--</b></span>
+                                <span>陀螺仪 <b id="gripRightGyro">--</b></span>
+                                <span>LED <b id="gripRightLedState">--</b></span>
+                                <span>发射端 <b id="gripRightTxParam">--</b></span>
+                                <span>接收端 <b id="gripRightRxParam">--</b></span>
+                                <span>最后响应 <b id="gripRightLastCmd">--</b></span>
+                                <span>数据帧率 <b id="gripRightFps">--</b></span>
+                                <span class="manual-v4-wide">力传感 <b id="gripRightForceList">--</b></span>
+                            </div>
+                            <div class="manual-v4-actions">
+                                <button type="button" data-control-v4-slot="right" data-control-v4-action="v4_single_report">单次状态</button>
+                                <button type="button" data-control-v4-slot="right" data-control-v4-action="v4_read_params">读取参数</button>
+                                <button type="button" data-control-v4-slot="right" data-control-v4-action="v4_force_zero">力传感置零</button>
+                                <button type="button" data-control-v4-slot="right" data-control-v4-action="v4_start_stream">恢复连续</button>
                             </div>
                         </div>
                     </div>

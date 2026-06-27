@@ -1,8 +1,5 @@
-// UmiGripper.hpp - UMI 手动夹爪 V2 驱动（Windows 版）
-// 通过 Win32 串口 API 与夹爪 MCU 通信
-// 协议：MCU→PC [0x0A, pos_float[4], btn1, btn2, 0x0A=左/0x0C=右]
-//       PC→MCU LED: [0x0A, 0x00, R, G, B, brightness, 0x0B]
-//       PC→MCU Stream: [0x00, 0x02, 0x03L/0x04R, 0x0A, action, 0, 0, 0, 0, 0x0B]
+// UmiGripper.hpp - UMI 手动夹爪 V4.0 驱动（Windows 版）
+// 通过 Win32 串口 API 与夹爪 MCU 通信，支持 AA 55 帧头、CRC16-Modbus 校验的新协议。
 
 #pragma once
 
@@ -28,13 +25,14 @@ public:
     UmiGripper();
     ~UmiGripper() override;
 
-    bool open(const std::string& port, int baudRate = 115200) override;
+    bool open(const std::string& port, int baudRate = 460800) override;
     void close() override;
     bool isConnected() const override;
     void getState(GripperState& out) const override;
     std::string getGripperType() const override { return "manual"; }
     std::string getPortName() const override { return portName_; }
     void setLed(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness = 100) override;
+    bool sendV4Action(const std::string& action);
     static std::vector<std::string> scanSerialPorts();
 
     // USB VID detection
@@ -43,9 +41,18 @@ public:
     std::string getHandSide() const { return handSide_; }
 
 private:
+    enum class ProtocolVersion {
+        Unknown,
+        LegacyV1,
+        V4
+    };
+
     void pollLoop();
-    bool syncFrame(uint8_t* buffer);
     bool sendCommand(const uint8_t* data, size_t len);
+    bool sendV4Frame(uint8_t command, const uint8_t* payload, size_t payloadLen);
+    bool tryStartV4WithFallbackBauds();
+    bool tryStartLegacyProtocol();
+    bool parseV4Frame(const uint8_t* frame, size_t frameLen);
     bool configurePort(int baudRate);
     void detectHandSide();
 
@@ -57,7 +64,13 @@ private:
     std::mutex serialMutex_;
     GripperState state_;
     std::string portName_;
-    std::string handSide_;  // "left" or "right", determined by USB VID (0x0E01=left, 0x0E02=right)
-    bool vidConfirmed_ = false;  // VID 已确认左右手，不再用尾针覆盖
+    std::string handSide_;  // "left" / "right" / "unknown"，优先由 USB VID 判断，未知 VID 时由槽位分配兜底。
+    bool vidConfirmed_ = false;  // VID 已确认左右手时，不再被协议帧尾或设备标识覆盖。
+    ProtocolVersion protocol_ = ProtocolVersion::Unknown;
+    std::vector<uint8_t> v4RxBuffer_;
+    bool hasSmoothedPosition_ = false;
+    float smoothedPosition_ = 0.0f;
+    bool hasSmoothedRawPosition_ = false;
+    float smoothedRawPosition_ = 0.0f;
     uint8_t lastLedR_ = 0, lastLedG_ = 0, lastLedB_ = 0, lastLedBrightness_ = 0;
 };

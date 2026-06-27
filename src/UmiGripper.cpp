@@ -1,4 +1,4 @@
-// UmiGripper.cpp - UMI 手动夹爪 V2 驱动（Windows 版）
+// UmiGripper.cpp - UMI 手动夹爪 V4.0 驱动（Windows 版）
 // 基于 Win32 串口 API（CreateFile/DCB/ReadFile/WriteFile）
 
 #include "UmiGripper.hpp"
@@ -18,30 +18,31 @@ static const GUID GUID_DEVINTERFACE_COMPORT = \
 #include <set>
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace {
-constexpr int kDefaultBaudRate = 115200;
-constexpr size_t kResponsePacketSize = 8;
-constexpr uint8_t kPacketHead = 0x0A;
-constexpr uint8_t kTailLeft  = 0x0A;
-constexpr uint8_t kTailRight = 0x0C;
-
-// LED 命令：共 7 字节，用于设置夹爪指示灯颜色和亮度。
-// 格式：[0x0A 头] [R] [G] [B] [0x00] [brightness] [0x0B 尾]
-constexpr size_t kLedCmdSize = 7;
-constexpr uint8_t kLedTail = 0x0B;
-
-// 数据流控制命令：共 10 字节，用于启动、停止或切换 MCU 数据上报。
-// 格式：[0x00 地址] [0x02 频率] [datahead 0x03左/0x04右] [0x0A 响应头]
-//      [action 0/1/2] [R] [G] [B] [brightness] [0x0B 尾]
-constexpr size_t kStreamCmdSize = 10;
-constexpr uint8_t kLedAddr = 0x00;
-constexpr uint8_t kLedFreq = 0x02;
-constexpr uint8_t kLedDataHeadLeft  = 0x03;
-constexpr uint8_t kLedDataHeadRight = 0x04;
-constexpr uint8_t kLedResp = 0x0A;
-constexpr uint8_t kStreamStartAction = 0x01;
-constexpr uint8_t kStreamStopAction  = 0x02;
+constexpr int kLegacyBaudRate = 115200;
+constexpr size_t kLegacyFrameSize = 8;
+constexpr uint8_t kLegacyPacketHead = 0x0A;
+constexpr uint8_t kLegacyTailLeft = 0x0A;
+constexpr uint8_t kLegacyTailRight = 0x0C;
+constexpr uint8_t kLegacyLedTail = 0x0B;
+constexpr int kV4BaudRate = 460800;
+constexpr int kV4WirelessBaudRate = 230400;
+constexpr uint8_t kV4Header0 = 0xAA;
+constexpr uint8_t kV4Header1 = 0x55;
+constexpr uint8_t kV4Tail = 0x0D;
+constexpr uint8_t kV4CommandStartReport = 0x01;
+constexpr uint8_t kV4CommandStopReport = 0x02;
+constexpr uint8_t kV4CommandSingleReport = 0x03;
+constexpr uint8_t kV4CommandSetLed = 0x10;
+constexpr uint8_t kV4CommandForceSetting = 0x12;
+constexpr uint8_t kV4CommandReadParams = 0x13;
+constexpr size_t kV4MinFrameSize = 7;
+constexpr size_t kV4MaxFrameSize = 128;
+constexpr float kV4PositionDeadband = 0.0100f;
+constexpr float kV4PositionSmoothAlpha = 0.12f;
+constexpr float kV4RawSmoothAlpha = 0.06f;
 
 constexpr int kMaxFailCount = 10;
 
@@ -49,36 +50,155 @@ constexpr uint16_t kVidLeft  = 0x0E01;
 constexpr uint16_t kVidRight = 0x0E02;
 constexpr uint16_t kPidGripper = 0xA001;
 
-bool isValidTail(uint8_t t) { return t == kTailLeft || t == kTailRight; }
-
-uint8_t dataHeadForSide(const std::string& side) {
-    return (side == "right") ? kLedDataHeadRight : kLedDataHeadLeft;
+bool isLikelyManualDataVid(uint16_t vid) {
+    return vid == 0x1A86 || vid == 0x10C4 || vid == 0x0403 || vid == 0x067B;
 }
 
-bool isPlausibleUmiFrame(const uint8_t* frame) {
+bool isValidLegacyTail(uint8_t value) {
+    return value == kLegacyTailLeft || value == kLegacyTailRight;
+}
+
+bool isPlausibleLegacyFrame(const uint8_t* frame) {
     if (!frame) return false;
-    if (frame[0] != kPacketHead || !isValidTail(frame[kResponsePacketSize - 1])) return false;
+    if (frame[0] != kLegacyPacketHead || !isValidLegacyTail(frame[kLegacyFrameSize - 1])) return false;
 
     float position = 0.0f;
     memcpy(&position, frame + 1, sizeof(position));
     if (!std::isfinite(position)) return false;
-
-    // 手动夹爪位置是浮点数，正常范围很小；这里放宽到 ±1000，
-    // 只用于排除 ASCII 日志、启动信息等被误当成夹爪帧的情况。
     if (position < -1000.0f || position > 1000.0f) return false;
-
-    // 两个按键字节正常为 0/1。这里放宽到低 4 位，兼容固件以后把按键扩展为状态位。
     if (frame[5] > 0x0F || frame[6] > 0x0F) return false;
     return true;
 }
 
-bool findUmiFrameInBuffer(const uint8_t* data, DWORD len, uint8_t outFrame[kResponsePacketSize]) {
-    if (!data || !outFrame || len < kResponsePacketSize) return false;
-    for (DWORD i = 0; i + kResponsePacketSize <= len; ++i) {
-        if (isPlausibleUmiFrame(data + i)) {
-            memcpy(outFrame, data + i, kResponsePacketSize);
+bool findLegacyFrameInBuffer(const uint8_t* data, DWORD len, uint8_t outFrame[kLegacyFrameSize]) {
+    if (!data || !outFrame || len < kLegacyFrameSize) return false;
+    for (DWORD i = 0; i + kLegacyFrameSize <= len; ++i) {
+        if (isPlausibleLegacyFrame(data + i)) {
+            memcpy(outFrame, data + i, kLegacyFrameSize);
             return true;
         }
+    }
+    return false;
+}
+
+uint16_t crc16Modbus(const uint8_t* data, size_t len) {
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; ++i) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; ++bit) {
+            if (crc & 0x0001) {
+                crc = (crc >> 1) ^ 0xA001;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    return crc;
+}
+
+uint32_t readU32BE(const uint8_t* data) {
+    return ((uint32_t)data[0] << 24) |
+           ((uint32_t)data[1] << 16) |
+           ((uint32_t)data[2] << 8) |
+           (uint32_t)data[3];
+}
+
+uint32_t readU32LE(const uint8_t* data) {
+    return ((uint32_t)data[3] << 24) |
+           ((uint32_t)data[2] << 16) |
+           ((uint32_t)data[1] << 8) |
+           (uint32_t)data[0];
+}
+
+float readFloat32LE(const uint8_t* data) {
+    uint32_t raw = readU32LE(data);
+    float value = 0.0f;
+    memcpy(&value, &raw, sizeof(value));
+    return value;
+}
+
+uint16_t readU16BE(const uint8_t* data) {
+    return ((uint16_t)data[0] << 8) | (uint16_t)data[1];
+}
+
+int16_t readI16BE(const uint8_t* data) {
+    return (int16_t)readU16BE(data);
+}
+
+bool isValidV4Frame(const uint8_t* frame, size_t frameLen) {
+    if (!frame || frameLen < kV4MinFrameSize) return false;
+    if (frame[0] != kV4Header0 || frame[1] != kV4Header1 || frame[frameLen - 1] != kV4Tail) return false;
+
+    const uint8_t payloadLen = frame[3];
+    const size_t expectedLen = kV4MinFrameSize + payloadLen;
+    if (expectedLen != frameLen) return false;
+
+    const uint16_t expectedCrc = crc16Modbus(frame + 2, 2 + payloadLen);
+    const uint16_t frameCrc = ((uint16_t)frame[4 + payloadLen] << 8) | frame[5 + payloadLen];
+    return expectedCrc == frameCrc;
+}
+
+bool findV4FrameInBuffer(const uint8_t* data, DWORD len, std::vector<uint8_t>& outFrame) {
+    outFrame.clear();
+    if (!data || len < kV4MinFrameSize) return false;
+
+    for (DWORD i = 0; i + kV4MinFrameSize <= len; ++i) {
+        if (data[i] != kV4Header0 || data[i + 1] != kV4Header1) continue;
+
+        uint8_t payloadLen = data[i + 3];
+        size_t frameLen = kV4MinFrameSize + payloadLen;
+        if (frameLen > kV4MaxFrameSize || i + frameLen > len) continue;
+        if (!isValidV4Frame(data + i, frameLen)) continue;
+        const uint8_t command = data[i + 2];
+        const bool isRealtimeFrame = (command == kV4CommandStartReport || command == kV4CommandSingleReport) && payloadLen >= 7;
+        const bool isParamFrame = command == kV4CommandReadParams && payloadLen >= 6;
+        const bool isAckFrame = command == kV4CommandSetLed || command == kV4CommandForceSetting || command == kV4CommandStopReport;
+        if (!isRealtimeFrame && !isParamFrame && !isAckFrame) continue;
+
+        outFrame.assign(data + i, data + i + frameLen);
+        return true;
+    }
+    return false;
+}
+
+bool popV4FrameFromBuffer(std::vector<uint8_t>& buffer, std::vector<uint8_t>& outFrame) {
+    outFrame.clear();
+    if (buffer.size() < kV4MinFrameSize) return false;
+
+    for (size_t i = 0; i + kV4MinFrameSize <= buffer.size(); ++i) {
+        if (buffer[i] != kV4Header0 || buffer[i + 1] != kV4Header1) continue;
+
+        uint8_t payloadLen = buffer[i + 3];
+        size_t frameLen = kV4MinFrameSize + payloadLen;
+        if (frameLen > kV4MaxFrameSize) {
+            buffer.erase(buffer.begin(), buffer.begin() + i + 1);
+            return false;
+        }
+        if (i + frameLen > buffer.size()) {
+            if (i > 0) buffer.erase(buffer.begin(), buffer.begin() + i);
+            return false;
+        }
+        if (!isValidV4Frame(buffer.data() + i, frameLen)) {
+            buffer.erase(buffer.begin(), buffer.begin() + i + 1);
+            return false;
+        }
+
+        const uint8_t command = buffer[i + 2];
+        const bool isRealtimeFrame = (command == kV4CommandStartReport || command == kV4CommandSingleReport) && payloadLen >= 7;
+        const bool isParamFrame = command == kV4CommandReadParams && payloadLen >= 6;
+        const bool isAckFrame = command == kV4CommandSetLed || command == kV4CommandForceSetting || command == kV4CommandStopReport;
+        if (!isRealtimeFrame && !isParamFrame && !isAckFrame) {
+            buffer.erase(buffer.begin(), buffer.begin() + i + frameLen);
+            return false;
+        }
+
+        outFrame.assign(buffer.begin() + i, buffer.begin() + i + frameLen);
+        buffer.erase(buffer.begin(), buffer.begin() + i + frameLen);
+        return true;
+    }
+
+    if (buffer.size() > kV4MinFrameSize) {
+        buffer.erase(buffer.begin(), buffer.end() - (kV4MinFrameSize - 1));
     }
     return false;
 }
@@ -123,8 +243,7 @@ void addComPortInfo(std::vector<ComPortVidInfo>& result,
     result.push_back(info);
     seenPorts.insert(portName);
 
-    fprintf(stderr, "[UmiGripper] COM port: %s  VID=0x%04X  PID=0x%04X  source=%s\n",
-        info.portName.c_str(), info.vid, info.pid, source ? source : "unknown");
+    (void)source;
 }
 } // namespace
 
@@ -227,15 +346,324 @@ UmiGripper::UmiGripper()
 
 UmiGripper::~UmiGripper() { close(); }
 
+bool UmiGripper::sendV4Frame(uint8_t command, const uint8_t* payload, size_t payloadLen) {
+    if (payloadLen > 255) return false;
+
+    std::vector<uint8_t> frame;
+    frame.reserve(kV4MinFrameSize + payloadLen);
+    frame.push_back(kV4Header0);
+    frame.push_back(kV4Header1);
+    frame.push_back(command);
+    frame.push_back((uint8_t)payloadLen);
+    for (size_t i = 0; i < payloadLen; ++i) frame.push_back(payload[i]);
+
+    const uint16_t crc = crc16Modbus(frame.data() + 2, 2 + payloadLen);
+    frame.push_back((uint8_t)((crc >> 8) & 0xFF));
+    frame.push_back((uint8_t)(crc & 0xFF));
+    frame.push_back(kV4Tail);
+
+    return sendCommand(frame.data(), frame.size());
+}
+
+bool UmiGripper::parseV4Frame(const uint8_t* frame, size_t frameLen) {
+    if (!isValidV4Frame(frame, frameLen)) return false;
+
+    const uint8_t command = frame[2];
+    const uint8_t payloadLen = frame[3];
+    const uint8_t* payload = frame + 4;
+    if (command == kV4CommandReadParams) {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        state_.connected = true;
+        state_.hasData = true;
+        state_.hasExtendedData = true;
+        state_.protocolVersion = 4;
+        state_.lastV4Command = command;
+        state_.payloadLength = payloadLen;
+        state_.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        if (payloadLen >= 6) {
+            state_.hasDeviceParams = true;
+            state_.txAddress = readU16BE(payload + 0);
+            state_.txFrequency = payload[2];
+            state_.rxAddress = readU16BE(payload + 3);
+            state_.rxFrequency = payload[5];
+        }
+        fprintf(stderr,
+                "[UMI夹爪 %s] V4读参响应 tx=0x%04X/%u rx=0x%04X/%u\n",
+                portName_.c_str(), state_.txAddress, state_.txFrequency,
+                state_.rxAddress, state_.rxFrequency);
+        return true;
+    }
+
+    if (command == kV4CommandSetLed || command == kV4CommandForceSetting || command == kV4CommandStopReport) {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        state_.connected = true;
+        state_.hasData = true;
+        state_.hasExtendedData = true;
+        state_.protocolVersion = 4;
+        state_.lastV4Command = command;
+        state_.payloadLength = payloadLen;
+        state_.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        return true;
+    }
+
+    if (command != kV4CommandStartReport && command != kV4CommandSingleReport) return false;
+    if (payloadLen < 7) return false;
+
+    const uint8_t deviceId = payload[0];
+    const uint8_t button1 = payload[1];
+    const uint8_t button2 = payload[2];
+    const uint32_t encoder = readU32LE(payload + 3);
+    const float encoderPosition = readFloat32LE(payload + 3);
+    bool validEncoderPosition = std::isfinite(encoderPosition)
+        && encoderPosition >= -0.05f
+        && encoderPosition <= 1.05f;
+
+    // V4.0 实时上报帧的磁编码字段固定在数据段第 3~6 字节。
+    // 厂家回包示例中的 80 26 AB 3B 按小端 float 解析约为 0.0052，
+    // 因此这里按 0~1 的浮点闭合位置处理；第 7 字节之后是 IMU 数据，不能作为闭合度备用值。
+
+    uint32_t displayPositionRaw = 0;
+    float position = 0.0f;
+
+    int16_t accel[3] = {0, 0, 0};
+    int16_t gyro[3] = {0, 0, 0};
+    int16_t forceValues[12] = {};
+    uint8_t forceCount = 0;
+    int forceMaxAbs = 0;
+    if (payloadLen >= 19) {
+        // 厂家 LSM6DS3 示例中 Gyroscope_ReadData() 的 12 字节顺序为：
+        // gyro_x/y/z 在前 6 字节，accel_x/y/z 在后 6 字节；每个 int16 按高字节在前输出。
+        for (int i = 0; i < 3; ++i) gyro[i] = readI16BE(payload + 7 + i * 2);
+        for (int i = 0; i < 3; ++i) accel[i] = readI16BE(payload + 13 + i * 2);
+    }
+    if (payloadLen >= 31) {
+        for (size_t i = 7; i + 1 < 31; i += 2) {
+            int16_t rawForce = readI16BE(payload + i);
+            if (forceCount < 12) forceValues[forceCount++] = rawForce;
+            int v = std::abs((int)rawForce);
+            if (v > forceMaxAbs) forceMaxAbs = v;
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    if (validEncoderPosition) {
+        float samplePosition = std::max(0.0f, std::min(1.0f, encoderPosition));
+        if (!hasSmoothedRawPosition_) {
+            smoothedRawPosition_ = samplePosition;
+            hasSmoothedRawPosition_ = true;
+        } else {
+            float rawDelta = samplePosition - smoothedRawPosition_;
+            if (std::fabs(rawDelta) > kV4PositionDeadband) {
+                smoothedRawPosition_ += rawDelta * kV4RawSmoothAlpha;
+            }
+        }
+    }
+    displayPositionRaw = hasSmoothedRawPosition_
+        ? (uint32_t)std::max(0.0f, std::round(smoothedRawPosition_ * 10000.0f))
+        : 0;
+
+    if (validEncoderPosition || hasSmoothedRawPosition_) {
+        position = displayPositionRaw / 10000.0f;
+        position = std::max(0.0f, std::min(1.0f, position));
+
+        if (!hasSmoothedPosition_) {
+            smoothedPosition_ = position;
+            hasSmoothedPosition_ = true;
+        } else if (std::fabs(position - smoothedPosition_) > kV4PositionDeadband) {
+            smoothedPosition_ += (position - smoothedPosition_) * kV4PositionSmoothAlpha;
+        }
+    }
+
+    state_.position = smoothedPosition_;
+    state_.button1 = button1;
+    state_.button2 = button2;
+    state_.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    state_.hasData = true;
+    state_.connected = true;
+    state_.hasExtendedData = true;
+    state_.protocolVersion = 4;
+    state_.lastV4Command = command;
+    state_.payloadLength = payloadLen;
+    state_.deviceId = deviceId;
+    state_.encoderRaw = encoder;
+    state_.positionRaw = displayPositionRaw;
+    state_.positionFallback = !validEncoderPosition;
+    if (command == kV4CommandSingleReport && payloadLen >= 23) {
+        state_.ledR = payload[payloadLen - 4];
+        state_.ledG = payload[payloadLen - 3];
+        state_.ledB = payload[payloadLen - 2];
+        state_.ledBrightness = payload[payloadLen - 1];
+    }
+    for (int i = 0; i < 3; ++i) {
+        state_.accel[i] = accel[i];
+        state_.gyro[i] = gyro[i];
+    }
+    state_.forceCount = forceCount;
+    state_.forceMaxAbs = forceMaxAbs;
+    for (int i = 0; i < 12; ++i) state_.force[i] = forceValues[i];
+
+    // V4.0 有线模式设备标识通常为 0x00，左右手主要靠 USB VID。
+    // 如果是无线模式，设备标识 0x01/0x02 可作为左右手补充信息。
+    if (!vidConfirmed_) {
+        if (deviceId == 0x01) {
+            handSide_ = "left";
+            vidConfirmed_ = true;
+            fprintf(stderr, "[UMI夹爪 %s] V4 设备标识=0x01 -> 左手\n", portName_.c_str());
+        } else if (deviceId == 0x02) {
+            handSide_ = "right";
+            vidConfirmed_ = true;
+            fprintf(stderr, "[UMI夹爪 %s] V4 设备标识=0x02 -> 右手\n", portName_.c_str());
+        } else {
+            handSide_ = "unknown";
+        }
+    }
+    return true;
+}
+
+bool UmiGripper::tryStartV4WithFallbackBauds() {
+    // V4.0 协议的有线 CDC 固定使用 460800，无线射频桥接使用 230400。
+    // 115200 用作 Windows CDC 驱动没有成功切换波特率时的兜底参数。
+    for (int baud : {kV4BaudRate, kV4WirelessBaudRate, 115200}) {
+        if (!configurePort(baud)) continue;
+
+        // 握手阶段不先发送停止上报，避免打断已经开始连续上报的 V4.0 设备。
+        PurgeComm(hSerial_, PURGE_TXCLEAR | PURGE_TXABORT);
+        ClearCommError(hSerial_, NULL, NULL);
+        if (!sendV4Frame(kV4CommandStartReport, nullptr, 0)) continue;
+
+        COMMTIMEOUTS timeouts;
+        timeouts.ReadIntervalTimeout = 5;
+        timeouts.ReadTotalTimeoutMultiplier = 0;
+        timeouts.ReadTotalTimeoutConstant = 35;
+        SetCommTimeouts(hSerial_, &timeouts);
+
+        uint8_t rawBuf[512] = {};
+        DWORD totalRead = 0;
+        for (int attempt = 0; attempt < 5 && totalRead < sizeof(rawBuf); ++attempt) {
+            DWORD n = 0;
+            ReadFile(hSerial_, rawBuf + totalRead, (DWORD)(sizeof(rawBuf) - totalRead), &n, NULL);
+            totalRead += n;
+
+            std::vector<uint8_t> frame;
+            if (findV4FrameInBuffer(rawBuf, totalRead, frame) && parseV4Frame(frame.data(), frame.size())) {
+                protocol_ = ProtocolVersion::V4;
+                setLed(10, 10, 10, 64);
+                fprintf(stderr, "[UMI夹爪] V4.0 协议握手成功: %s, baud=%d, side=%s\n",
+                        portName_.c_str(), baud, handSide_.c_str());
+                return true;
+            }
+        }
+
+        // 连续上报没有返回有效帧时，用单次上报再验证一次，兼容只响应单次查询的固件状态。
+        totalRead = 0;
+        memset(rawBuf, 0, sizeof(rawBuf));
+        if (sendV4Frame(kV4CommandSingleReport, nullptr, 0)) {
+            for (int attempt = 0; attempt < 3 && totalRead < sizeof(rawBuf); ++attempt) {
+                DWORD n = 0;
+                ReadFile(hSerial_, rawBuf + totalRead, (DWORD)(sizeof(rawBuf) - totalRead), &n, NULL);
+                totalRead += n;
+
+                std::vector<uint8_t> frame;
+                if (findV4FrameInBuffer(rawBuf, totalRead, frame) && parseV4Frame(frame.data(), frame.size())) {
+                    protocol_ = ProtocolVersion::V4;
+                    setLed(10, 10, 10, 64);
+                    fprintf(stderr, "[UMI澶圭埅] V4.0 鍗忚鎻℃墜鎴愬姛: %s, baud=%d, side=%s\n",
+                            portName_.c_str(), baud, handSide_.c_str());
+                    return true;
+                }
+            }
+        }
+
+        if (totalRead > 0) {
+            DWORD dumpLen = std::min<DWORD>(totalRead, 32);
+            fprintf(stderr, "[UMI澶圭埅] %s baud=%d 鎻℃墜鏈В鏋愬埌 V4 甯э紝鍘熷鍓?%lu 瀛楄妭:",
+                    portName_.c_str(), baud, (unsigned long)dumpLen);
+            for (DWORD i = 0; i < dumpLen; ++i) {
+                fprintf(stderr, " %02X", rawBuf[i]);
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+
+    return false;
+}
+
 // ---- 打开与关闭串口 ----
+
+bool UmiGripper::tryStartLegacyProtocol() {
+    uint16_t vid = queryVidForPort(portName_);
+    if (vid != kVidLeft && vid != kVidRight && !isLikelyManualDataVid(vid)) return false;
+    if (!configurePort(kLegacyBaudRate)) return false;
+
+    PurgeComm(hSerial_, PURGE_RXCLEAR | PURGE_TXCLEAR | PURGE_RXABORT | PURGE_TXABORT);
+    ClearCommError(hSerial_, NULL, NULL);
+
+    uint8_t startCmd[7] = {kLegacyPacketHead, 0x01, 0x00, 0x00, 0x00, 0x00, kLegacyLedTail};
+    DWORD written = 0;
+    WriteFile(hSerial_, startCmd, sizeof(startCmd), &written, NULL);
+    FlushFileBuffers(hSerial_);
+
+    COMMTIMEOUTS timeouts;
+    timeouts.ReadIntervalTimeout = 5;
+    timeouts.ReadTotalTimeoutMultiplier = 0;
+    timeouts.ReadTotalTimeoutConstant = 60;
+    timeouts.WriteTotalTimeoutMultiplier = 0;
+    timeouts.WriteTotalTimeoutConstant = 100;
+    SetCommTimeouts(hSerial_, &timeouts);
+
+    uint8_t rawBuf[128] = {};
+    DWORD totalRead = 0;
+    for (int attempt = 0; attempt < 5 && totalRead < sizeof(rawBuf); ++attempt) {
+        DWORD n = 0;
+        ReadFile(hSerial_, rawBuf + totalRead, (DWORD)(sizeof(rawBuf) - totalRead), &n, NULL);
+        totalRead += n;
+
+        uint8_t frame[kLegacyFrameSize] = {};
+        if (!findLegacyFrameInBuffer(rawBuf, totalRead, frame)) continue;
+
+        {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            memcpy(&state_.position, frame + 1, sizeof(float));
+            state_.button1 = frame[5];
+            state_.button2 = frame[6];
+            state_.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            state_.hasData = true;
+            state_.connected = true;
+            state_.hasExtendedData = false;
+            state_.protocolVersion = 1;
+        }
+
+        if (!vidConfirmed_) {
+            uint8_t tail = frame[kLegacyFrameSize - 1];
+            if (tail == kLegacyTailRight) {
+                handSide_ = "right";
+                vidConfirmed_ = true;
+            } else if (tail == kLegacyTailLeft) {
+                handSide_ = "left";
+                vidConfirmed_ = true;
+            }
+        }
+
+        protocol_ = ProtocolVersion::LegacyV1;
+        fprintf(stderr, "[UMI] legacy protocol connected: %s, side=%s\n",
+                portName_.c_str(), handSide_.c_str());
+        return true;
+    }
+
+    return false;
+}
 
 bool UmiGripper::open(const std::string& port, int baudRate) {
     close();
 
     std::string winPort = "\\\\.\\" + port;
 
-    // 双打开策略：先打开再关闭一次用于复位 USB 串口驱动，然后重新打开正式通信。
-    {
+    // 新 V4.0 CDC 主控板不需要预打开复位；连续打开/关闭反而可能让 Windows CDC 驱动短暂返回 error=31。
+    if (false) {
         HANDLE hInit = CreateFileA(winPort.c_str(), GENERIC_READ | GENERIC_WRITE,
                                    0, NULL, OPEN_EXISTING, 0, NULL);
         if (hInit != INVALID_HANDLE_VALUE) {
@@ -252,133 +680,83 @@ bool UmiGripper::open(const std::string& port, int baudRate) {
         return false;
     }
 
-    if (!configurePort(baudRate)) {
-        fprintf(stderr, "[UMI夹爪] 配置串口失败 %s\n", port.c_str());
-        CloseHandle(hSerial_);
-        hSerial_ = INVALID_HANDLE_VALUE;
-        return false;
-    }
-
     portName_ = port;
-    PurgeComm(hSerial_, PURGE_RXCLEAR | PURGE_TXCLEAR | PURGE_RXABORT | PURGE_TXABORT);
-    ClearCommError(hSerial_, NULL, NULL);
-
-    fprintf(stderr, "[UMI夹爪] 串口 %s 已打开, 波特率=%d\n", port.c_str(), baudRate);
-
-    // 优先通过 USB VID 判断左右手，避免仅依赖数据帧尾字节造成误判。
+    protocol_ = ProtocolVersion::Unknown;
+    v4RxBuffer_.clear();
+    hasSmoothedPosition_ = false;
+    smoothedPosition_ = 0.0f;
+    hasSmoothedRawPosition_ = false;
+    smoothedRawPosition_ = 0.0f;
     detectHandSide();
 
-    // 等待 USB 串口驱动稳定，减少刚打开端口时的首包丢失。
-    Sleep(500);
+    // 新主控板 V4.0 使用 460800 波特率和 AA55 带 CRC 帧。
+    // 当前项目只支持新协议，握手失败时直接关闭串口，避免误占用设备。
+    if (tryStartV4WithFallbackBauds()) {
+        COMMTIMEOUTS timeouts;
+        timeouts.ReadIntervalTimeout = MAXDWORD;
+        timeouts.ReadTotalTimeoutMultiplier = 0;
+        timeouts.ReadTotalTimeoutConstant = 50;
+        SetCommTimeouts(hSerial_, &timeouts);
 
-    // 第一步：发送停止命令，清除 MCU 可能残留的上报状态。
-    {
-        uint8_t stopCmd[kLedCmdSize] = {kPacketHead, 0x02, 0x00, 0x00, 0x00, 0x00, kLedTail};
-        DWORD written = 0;
-        WriteFile(hSerial_, stopCmd, kLedCmdSize, &written, NULL);
-        FlushFileBuffers(hSerial_);
-        fprintf(stderr, "[UMI夹爪] 停止命令已发送 (%lu bytes)\n", written);
-    }
-    Sleep(100);
-    PurgeComm(hSerial_, PURGE_RXCLEAR | PURGE_TXCLEAR);
+        connected_ = true;
+        state_.connected = true;
+        running_ = true;
+        pollThread_ = std::thread(&UmiGripper::pollLoop, this);
 
-    // 第二步：发送启动上报命令；没有这一步 MCU 不会主动发送夹爪数据。
-    {
-        uint8_t startCmd[kLedCmdSize] = {kPacketHead, 0x01, 0x00, 0x00, 0x00, 0x00, kLedTail};
-        DWORD written = 0;
-        WriteFile(hSerial_, startCmd, kLedCmdSize, &written, NULL);
-        FlushFileBuffers(hSerial_);
-        fprintf(stderr, "[UMI夹爪] 启动数据流命令已发送 (%lu bytes)\n", written);
+        fprintf(stderr, "[UMI夹爪] 已连接 %s (V4.0, side=%s)\n", port.c_str(), handSide_.c_str());
+        return true;
     }
 
-    // 第三步：设置 LED，用颜色提示当前夹爪已经连接。
-    {
-        uint8_t ledCmd[kLedCmdSize] = {kPacketHead, 0x00, 10, 10, 10, 64, kLedTail};
-        DWORD written = 0;
-        WriteFile(hSerial_, ledCmd, kLedCmdSize, &written, NULL);
-        FlushFileBuffers(hSerial_);
-        fprintf(stderr, "[UMI夹爪] LED唤醒命令已发送 (%lu bytes)\n", written);
+    fprintf(stderr, "[UMI夹爪] %s 未完成 V4.0 握手，跳过该串口\n", port.c_str());
+    fprintf(stderr, "[UMI] %s V4 handshake failed, try legacy protocol\n", port.c_str());
+    if (tryStartLegacyProtocol()) {
+        COMMTIMEOUTS timeouts;
+        timeouts.ReadIntervalTimeout = MAXDWORD;
+        timeouts.ReadTotalTimeoutMultiplier = 0;
+        timeouts.ReadTotalTimeoutConstant = 50;
+        SetCommTimeouts(hSerial_, &timeouts);
+
+        connected_ = true;
+        state_.connected = true;
+        running_ = true;
+        pollThread_ = std::thread(&UmiGripper::pollLoop, this);
+        return true;
     }
 
-    // 等待 MCU 开始稳定上报数据。
-    fprintf(stderr, "[UMI夹爪] 等待MCU响应...\n");
-    Sleep(500);
+    uint16_t vid = queryVidForPort(portName_);
+    if (false && (vid == kVidLeft || vid == kVidRight)) {
+        // VID 已经确认是 UMI 手动夹爪时，不因为刚插上时首帧延迟就放弃槽位。
+        // Windows CDC 重新枚举后可能短时间不回数据，先挂入槽位，轮询线程继续等待 AA55 数据帧。
+        protocol_ = ProtocolVersion::V4;
+        COMMTIMEOUTS timeouts;
+        timeouts.ReadIntervalTimeout = MAXDWORD;
+        timeouts.ReadTotalTimeoutMultiplier = 0;
+        timeouts.ReadTotalTimeoutConstant = 50;
+        SetCommTimeouts(hSerial_, &timeouts);
+        sendV4Frame(kV4CommandStartReport, nullptr, 0);
 
-    COMMTIMEOUTS timeouts;
-    timeouts.ReadIntervalTimeout = 100;
-    timeouts.ReadTotalTimeoutMultiplier = 0;
-    timeouts.ReadTotalTimeoutConstant = 5000;
-    SetCommTimeouts(hSerial_, &timeouts);
-
-    // 按字节读取原始数据，便于定位协议头尾错位或串口噪声问题。
-    uint8_t rawBuf[64];
-    DWORD totalRead = 0;
-    for (int attempt = 0; attempt < 64 && totalRead < sizeof(rawBuf); attempt++) {
-        uint8_t oneByte;
-        DWORD n = 0;
-        if (!ReadFile(hSerial_, &oneByte, 1, &n, NULL) || n == 0) break;
-        rawBuf[totalRead++] = oneByte;
-    }
-
-    if (totalRead == 0) {
-        DWORD errors = 0;
-        COMSTAT comStat;
-        ClearCommError(hSerial_, &errors, &comStat);
-        fprintf(stderr, "[UMI夹爪] 无数据 (drvErrors=0x%lX, inQueue=%lu, outQueue=%lu)\n",
-                errors, comStat.cbInQue, comStat.cbOutQue);
-        CloseHandle(hSerial_);
-        hSerial_ = INVALID_HANDLE_VALUE;
-        return false;
-    }
-
-    fprintf(stderr, "[UMI夹爪] 收到 %lu 字节:", totalRead);
-    for (DWORD i = 0; i < totalRead; i++) fprintf(stderr, " %02X", rawBuf[i]);
-    fprintf(stderr, "\n");
-
-    uint8_t firstFrame[kResponsePacketSize] = {};
-    if (!findUmiFrameInBuffer(rawBuf, totalRead, firstFrame)) {
-        fprintf(stderr, "[UMI夹爪] %s 未收到有效 UMI 数据帧，判定不是手动夹爪\n", port.c_str());
-        CloseHandle(hSerial_);
-        hSerial_ = INVALID_HANDLE_VALUE;
-        return false;
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(stateMutex_);
-        memcpy(&state_.position, &firstFrame[1], 4);
-        state_.button1 = firstFrame[5];
-        state_.button2 = firstFrame[6];
-        state_.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-        state_.hasData = true;
-
-        if (!vidConfirmed_) {
-            uint8_t tail = firstFrame[kResponsePacketSize - 1];
-            if (tail == kTailRight) {
-                handSide_ = "right";
-                vidConfirmed_ = true;
-                fprintf(stderr, "[UMI夹爪 %s] 首帧尾针=0x0C -> 右手\n", portName_.c_str());
-            } else if (tail == kTailLeft) {
-                handSide_ = "left";
-                vidConfirmed_ = true;
-                fprintf(stderr, "[UMI夹爪 %s] 首帧尾针=0x0A -> 左手\n", portName_.c_str());
-            }
+        {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            state_.connected = true;
+            state_.hasData = false;
+            state_.hasExtendedData = true;
+            state_.protocolVersion = 4;
+            state_.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
         }
+
+        connected_ = true;
+        running_ = true;
+        pollThread_ = std::thread(&UmiGripper::pollLoop, this);
+        fprintf(stderr, "[UMI] %s VID=0x%04X trusted, assign slot first and wait V4 data\n",
+                port.c_str(), vid);
+        return true;
     }
 
-    // 恢复非阻塞超时，避免轮询线程被串口读取长时间卡住。
-    timeouts.ReadIntervalTimeout = MAXDWORD;
-    timeouts.ReadTotalTimeoutMultiplier = 0;
-    timeouts.ReadTotalTimeoutConstant = 50;
-    SetCommTimeouts(hSerial_, &timeouts);
-
-    connected_ = true;
-    state_.connected = true;
-    running_ = true;
-    pollThread_ = std::thread(&UmiGripper::pollLoop, this);
-
-    fprintf(stderr, "[UMI夹爪] 已连接 %s (%s手)\n", port.c_str(), handSide_.c_str());
-    return true;
+    CloseHandle(hSerial_);
+    hSerial_ = INVALID_HANDLE_VALUE;
+    protocol_ = ProtocolVersion::Unknown;
+    return false;
 }
 
 void UmiGripper::close() {
@@ -388,13 +766,13 @@ void UmiGripper::close() {
     if (pollThread_.joinable()) pollThread_.join();
     if (hSerial_ != INVALID_HANDLE_VALUE) {
         setLed(0, 0, 0, 0);
-        uint8_t dataHead = dataHeadForSide(handSide_);
-        uint8_t stopCmd[kStreamCmdSize] = {kLedAddr, kLedFreq, dataHead, kLedResp,
-                                         kStreamStopAction, 0, 0, 0, 0, kLedTail};
-        sendCommand(stopCmd, kStreamCmdSize);
+        if (protocol_ == ProtocolVersion::V4) {
+            sendV4Frame(kV4CommandStopReport, nullptr, 0);
+        }
         CloseHandle(hSerial_);
         hSerial_ = INVALID_HANDLE_VALUE;
     }
+    protocol_ = ProtocolVersion::Unknown;
 }
 
 bool UmiGripper::isConnected() const { return connected_; }
@@ -405,10 +783,50 @@ void UmiGripper::getState(GripperState& out) const {
 }
 
 void UmiGripper::setLed(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness) {
-    uint8_t cmd[kLedCmdSize] = {kPacketHead, 0x00, r, g, b, brightness, kLedTail};
-    fprintf(stderr, "[LED] %s手 发送: %02X %02X %02X %02X %02X %02X %02X\n",
-            handSide_.c_str(), cmd[0], cmd[1], cmd[2], cmd[3], cmd[4], cmd[5], cmd[6]);
-    sendCommand(cmd, kLedCmdSize);
+    lastLedR_ = r;
+    lastLedG_ = g;
+    lastLedB_ = b;
+    lastLedBrightness_ = brightness;
+
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        state_.ledR = r;
+        state_.ledG = g;
+        state_.ledB = b;
+        state_.ledBrightness = brightness;
+        state_.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        if (protocol_ == ProtocolVersion::V4) {
+            state_.hasExtendedData = true;
+            state_.protocolVersion = 4;
+            state_.lastV4Command = kV4CommandSetLed;
+        }
+    }
+
+    if (protocol_ != ProtocolVersion::V4) return;
+    uint8_t payload[4] = {r, g, b, brightness};
+    sendV4Frame(kV4CommandSetLed, payload, sizeof(payload));
+}
+
+bool UmiGripper::sendV4Action(const std::string& action) {
+    if (!connected_ || hSerial_ == INVALID_HANDLE_VALUE || protocol_ != ProtocolVersion::V4) {
+        return false;
+    }
+
+    if (action == "v4_single_report") {
+        return sendV4Frame(kV4CommandSingleReport, nullptr, 0);
+    }
+    if (action == "v4_read_params") {
+        return sendV4Frame(kV4CommandReadParams, nullptr, 0);
+    }
+    if (action == "v4_force_zero") {
+        uint8_t payload[1] = {0x01};
+        return sendV4Frame(kV4CommandForceSetting, payload, sizeof(payload));
+    }
+    if (action == "v4_start_stream") {
+        return sendV4Frame(kV4CommandStartReport, nullptr, 0);
+    }
+    return false;
 }
 
 // ---- 串口扫描 ----
@@ -430,7 +848,7 @@ std::vector<std::string> UmiGripper::scanSerialPorts() {
 // ---- 左右手识别 ----
 
 void UmiGripper::detectHandSide() {
-    handSide_ = "left";  // default
+    handSide_ = "unknown";
     vidConfirmed_ = false;
 
     // 优先通过 USB VID 判断左右手。
@@ -454,16 +872,21 @@ void UmiGripper::detectHandSide() {
 // ---- 串口参数配置 ----
 
 bool UmiGripper::configurePort(int baudRate) {
-    // 从零构造 DCB，避免复用系统默认串口配置带来的隐藏状态。
     DCB dcb;
     memset(&dcb, 0, sizeof(dcb));
     dcb.DCBlength = sizeof(dcb);
-
-    char dcbStr[64];
-    snprintf(dcbStr, sizeof(dcbStr), "baud=%d parity=N data=8 stop=1", baudRate);
-    if (!BuildCommDCBA(dcbStr, &dcb)) return false;
+    if (!GetCommState(hSerial_, &dcb)) {
+        fprintf(stderr, "[UMI夹爪] GetCommState 失败 baud=%d error=%lu\n", baudRate, GetLastError());
+        return false;
+    }
 
     // 显式关闭所有流控，保证 MCU 协议按裸串口方式收发。
+    dcb.BaudRate = (DWORD)baudRate;
+    dcb.ByteSize = 8;
+    dcb.Parity = NOPARITY;
+    dcb.StopBits = ONESTOPBIT;
+    dcb.fBinary = TRUE;
+    dcb.fParity = FALSE;
     dcb.fOutxCtsFlow = FALSE;
     dcb.fOutxDsrFlow = FALSE;
     dcb.fDtrControl = DTR_CONTROL_ENABLE;
@@ -473,7 +896,10 @@ bool UmiGripper::configurePort(int baudRate) {
     dcb.fRtsControl = RTS_CONTROL_ENABLE;
     dcb.fAbortOnError = FALSE;
 
-    if (!SetCommState(hSerial_, &dcb)) return false;
+    if (!SetCommState(hSerial_, &dcb)) {
+        DWORD err = GetLastError();
+        fprintf(stderr, "[UMI夹爪] SetCommState 警告 baud=%d error=%lu，继续按 CDC 默认参数通信\n", baudRate, err);
+    }
 
     COMMTIMEOUTS timeouts;
     timeouts.ReadIntervalTimeout = MAXDWORD;
@@ -497,13 +923,12 @@ void UmiGripper::pollLoop() {
             continue;
         }
 
-        uint8_t buffer[kResponsePacketSize];
+        uint8_t chunk[64] = {};
         DWORD bytesRead = 0;
-        if (!ReadFile(hSerial_, buffer, kResponsePacketSize, &bytesRead, NULL)
-            || bytesRead != kResponsePacketSize) {
+        if (!ReadFile(hSerial_, chunk, sizeof(chunk), &bytesRead, NULL) || bytesRead == 0) {
             failCount++;
-            if (failCount >= kMaxFailCount) {
-                fprintf(stderr, "[UMI夹爪] 连续通信失败，标记为断开\n");
+            if (failCount >= kMaxFailCount * 40) {
+                fprintf(stderr, "[UMI夹爪] V4 连续通信失败，标记为断开\n");
                 connected_ = false;
                 state_.connected = false;
                 return;
@@ -511,57 +936,34 @@ void UmiGripper::pollLoop() {
             continue;
         }
 
-        if (!isPlausibleUmiFrame(buffer)) {
-            if (!syncFrame(buffer)) {
-                failCount++;
-                continue;
+        if (protocol_ == ProtocolVersion::LegacyV1) {
+            uint8_t frame[kLegacyFrameSize] = {};
+            if (findLegacyFrameInBuffer(chunk, bytesRead, frame)) {
+                std::lock_guard<std::mutex> lock(stateMutex_);
+                memcpy(&state_.position, frame + 1, sizeof(float));
+                state_.button1 = frame[5];
+                state_.button2 = frame[6];
+                state_.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                state_.hasData = true;
+                state_.connected = true;
+                failCount = 0;
+            }
+            continue;
+        }
+
+        v4RxBuffer_.insert(v4RxBuffer_.end(), chunk, chunk + bytesRead);
+        if (v4RxBuffer_.size() > 512) {
+            v4RxBuffer_.erase(v4RxBuffer_.begin(), v4RxBuffer_.end() - 256);
+        }
+
+        std::vector<uint8_t> frame;
+        while (popV4FrameFromBuffer(v4RxBuffer_, frame)) {
+            if (parseV4Frame(frame.data(), frame.size())) {
+                failCount = 0;
             }
         }
-
-        {
-            std::lock_guard<std::mutex> lock(stateMutex_);
-            memcpy(&state_.position, &buffer[1], 4);
-            state_.button1 = buffer[5];
-            state_.button2 = buffer[6];
-            state_.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
-            state_.hasData = true;
-
-            // 只有 VID 未确认左右手时，才根据数据帧尾字节补充判断。
-            if (!vidConfirmed_) {
-                uint8_t tail = buffer[kResponsePacketSize - 1];
-                if (tail == kTailRight && handSide_ != "right") {
-                    handSide_ = "right";
-                    vidConfirmed_ = true;
-                    fprintf(stderr, "[UMI夹爪 %s] 尾针=0x0C -> 右手\n", portName_.c_str());
-                } else if (tail == kTailLeft && handSide_ != "left") {
-                    handSide_ = "left";
-                    vidConfirmed_ = true;
-                    fprintf(stderr, "[UMI夹爪 %s] 尾针=0x0A -> 左手\n", portName_.c_str());
-                }
-            }
-
-        }
-        failCount = 0;
     }
-}
-
-bool UmiGripper::syncFrame(uint8_t* buffer) {
-    constexpr int kBufferCapacity = 4 * kResponsePacketSize;
-    uint8_t buf[kBufferCapacity];
-    memcpy(buf, buffer, kResponsePacketSize);
-
-    for (int i = 0; i < kBufferCapacity - (int)kResponsePacketSize; ++i) {
-        DWORD bytesRead = 0;
-        if (!ReadFile(hSerial_, &buf[kResponsePacketSize + i], 1, &bytesRead, NULL) || bytesRead != 1)
-            return false;
-
-        memcpy(buffer, &buf[i + 1], kResponsePacketSize);
-        if (isPlausibleUmiFrame(buffer)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 // ---- 命令发送 ----

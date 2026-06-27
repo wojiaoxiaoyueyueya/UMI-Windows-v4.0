@@ -90,6 +90,9 @@ public:
     // 交换两个槽位的摄像头
     bool swapSlots(const std::string& pos1, const std::string& pos2);
 
+    // 交换左右手动夹爪槽位，用于固件左右手标识相同或物理连接顺序反向时的软件校正。
+    bool swapManualGripperSlots();
+
     // 将指定序列号的摄像头分配到目标槽位
     bool assignCamera(const std::string& serial, const std::string& targetSlot);
 
@@ -108,4 +111,5 @@ private:
     mutable std::mutex detectedInfoMutex_;
     uint64_t lastCameraRefreshUs_ = 0;
     uint64_t lastGripperRefreshUs_ = 0;
+    std::map<std::string, uint64_t> manualOpenRetryAfterUs_;
 };

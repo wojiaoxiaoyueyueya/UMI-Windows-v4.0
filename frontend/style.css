@@ -905,6 +905,14 @@ body.sidebar-collapsed .sidebar-toggle-btn { left: 6px; }
 .grip-conv { color: var(--accent-blue) !important; font-size: 24px !important; }
 .control-layout { height: calc(100vh - 95px); }
 
+#page-control .collect-status-panel {
+    max-height: none;
+    overflow: visible;
+}
+#page-control .collect-content {
+    align-items: flex-start;
+}
+
 /* ---- 目录浏览弹窗 ---- */
 .dir-modal-overlay { position:fixed;inset:0;z-index:300;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center; }
 .dir-modal { background:var(--card-bg);border-radius:8px;width:480px;max-height:70vh;display:flex;flex-direction:column;box-shadow:0 8px 30px rgba(0,0,0,0.2); }
@@ -1080,6 +1088,154 @@ body.sidebar-collapsed .sidebar-toggle-btn { left:6px; }
 .teleop-track-header strong { color:var(--text); font-family:'SF Mono',SFMono-Regular,Consolas,monospace; }
 .teleop-bar-wrap { height:12px; margin-bottom:0; }
 .teleop-manual-bar { background:linear-gradient(90deg,#2563eb,#14b8a6); }
+
+.manual-telemetry-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px 10px;
+    margin: 2px 16px 0;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #f8fafc;
+    color: var(--text-sub);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}
+.manual-telemetry-grid span {
+    min-width: 0;
+    display: flex;
+    justify-content: space-between;
+    gap: 6px;
+}
+.manual-telemetry-grid b {
+    color: var(--text);
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.manual-v4-panel {
+    margin: 0 16px 2px;
+    padding: 10px;
+    border: 1px solid #d7e0ea;
+    border-radius: 6px;
+    background: #ffffff;
+}
+.manual-v4-title {
+    margin-bottom: 8px;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 800;
+}
+.manual-v4-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 5px 10px;
+    color: var(--text-sub);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}
+.manual-v4-grid span {
+    min-width: 0;
+    display: flex;
+    justify-content: space-between;
+    gap: 6px;
+}
+.manual-v4-grid b {
+    color: var(--text);
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.manual-v4-grid .manual-v4-wide {
+    grid-column: 1 / -1;
+}
+.manual-v4-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    margin-top: 10px;
+}
+.manual-v4-actions button {
+    height: 30px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    background: #f8fafc;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+}
+.manual-v4-actions button:hover {
+    background: #eef6ff;
+    border-color: #93c5fd;
+}
+.control-manual-telemetry,
+.control-manual-v4-panel,
+.manual-display-calibration {
+    margin: 12px 0 0;
+}
+.manual-display-calibration {
+    padding: 10px;
+    border: 1px solid #d7e0ea;
+    border-radius: 6px;
+    background: #fbfdff;
+}
+.display-cal-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    align-items: center;
+    color: var(--text-sub);
+    font-size: 12px;
+}
+.display-cal-grid label {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(90px, 1fr) minmax(66px, 86px);
+    gap: 6px;
+    align-items: center;
+    white-space: nowrap;
+}
+.display-cal-grid input {
+    width: 100%;
+    height: 30px;
+    padding: 0 8px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    background: #fff;
+    color: var(--text);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}
+.display-cal-actions button {
+    height: 30px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    background: #f8fafc;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+}
+.display-cal-actions button:hover {
+    background: #eef6ff;
+    border-color: #93c5fd;
+}
+.display-cal-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    margin-top: 8px;
+}
+.display-cal-hint {
+    margin-top: 8px;
+    color: var(--text-dim);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}
 .teleop-electric-bar { background:linear-gradient(90deg,#0f766e,#f59e0b); }
 .teleop-log { min-height:72px; padding:10px; border-radius:6px; background:#f8fafc; color:var(--text-sub); font-size:12px; line-height:1.7; white-space:pre-wrap; font-family:'SF Mono',SFMono-Regular,Consolas,monospace; }
 

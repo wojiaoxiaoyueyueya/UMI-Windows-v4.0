@@ -267,8 +267,6 @@ bool ElectricGripper::verifyMotorConnection(int timeoutMs) {
 bool ElectricGripper::sendCANFrame(uint32_t id, const uint8_t* data, uint8_t len) {
     if (usingSerialBridge_) {
         if (!hasSerialBridgeHandle() || !connected_) {
-            fprintf(stderr, "[电动夹爪] ESP32-CAN 发送失败: serial=%p connected=%d\n",
-                    (void*)serialBridge_, connected_.load());
             return false;
         }
         if (len > 8) len = 8;
@@ -281,15 +279,11 @@ bool ElectricGripper::sendCANFrame(uint32_t id, const uint8_t* data, uint8_t len
         bool ok = writeSerialBridgeLine(line);
         if (ok) {
             markSerialBridgeAlive();
-        } else {
-            fprintf(stderr, "[电动夹爪] ESP32-CAN raw 发送失败: %s\n", line);
         }
         return ok;
     }
 
     if (!can_ || !connected_) {
-        fprintf(stderr, "[电动夹爪] sendCANFrame 失败: can_=%p connected=%d\n",
-                (void*)can_, connected_.load());
         return false;
     }
     ECAN_CAN_OBJ obj = {};
@@ -300,12 +294,6 @@ bool ElectricGripper::sendCANFrame(uint32_t id, const uint8_t* data, uint8_t len
     obj.DataLen = len;
     memcpy(obj.Data, data, len);
     bool ok = can_->transmit(obj);
-    if (!ok) {
-        fprintf(stderr, "[电动夹爪] Transmit 失败: ID=0x%03X len=%d data=[%02X %02X %02X %02X %02X %02X %02X %02X]\n",
-                id, (int)len,
-                len > 0 ? data[0] : 0, len > 1 ? data[1] : 0, len > 2 ? data[2] : 0, len > 3 ? data[3] : 0,
-                len > 4 ? data[4] : 0, len > 5 ? data[5] : 0, len > 6 ? data[6] : 0, len > 7 ? data[7] : 0);
-    }
     return ok;
 }
 
@@ -957,7 +945,6 @@ void ElectricGripper::pollLoop() {
     }
 
     ECAN_CAN_OBJ recvBuf[10];
-    int noDataCount = 0;
 
     while (running_) {
         if (!can_) {
@@ -965,8 +952,6 @@ void ElectricGripper::pollLoop() {
             continue;
         }
 
-        // 检查接收缓冲区中的帧数
-        ULONG bufCount = can_->getReceiveNum();
         int count = can_->receive(recvBuf, 10, 100); // 增大超时到100ms
         for (int i = 0; i < count; i++) {
             if (recvBuf[i].ID == CAN_CONFIG_ID && recvBuf[i].DataLen >= 2) {
@@ -990,15 +975,5 @@ void ElectricGripper::pollLoop() {
             }
         }
 
-        if (count == 0) {
-            noDataCount++;
-            if (noDataCount == 20) { // 约2秒
-                fprintf(stderr, "[电动夹爪] 等待响应... (缓冲区帧数=%lu, receive返回=%d)\n",
-                        (unsigned long)bufCount, count);
-                noDataCount = 0;
-            }
-        } else {
-            noDataCount = 0;
-        }
     }
 }

@@ -616,7 +616,37 @@ int main(int argc, char* argv[]) {
         }
     }
     std::thread hotplugThread([&]() {
+        int refreshTick = 0;
         while (g_running) {
+            refreshTick++;
+            if (refreshTick >= 4) {
+                refreshTick = 0;
+                bool needCameraScan = false;
+                for (auto& slotName : deviceMgr.getSlotNames()) {
+                    auto* slot = deviceMgr.getSlot(slotName);
+                    if (!slot || !slot->connected || !slot->camera) {
+                        needCameraScan = true;
+                        break;
+                    }
+                }
+                if (needCameraScan) {
+                    deviceMgr.refreshDetectedCameras();
+                    deviceMgr.attachDetectedCamerasToEmptySlots();
+                }
+
+                bool needManualGripperScan = false;
+                for (const auto& slotName : {std::string("left"), std::string("right")}) {
+                    auto* gslot = deviceMgr.getGripperSlot(slotName);
+                    if (!gslot || !gslot->connected || !gslot->gripper) {
+                        needManualGripperScan = true;
+                        break;
+                    }
+                }
+                if (needManualGripperScan) {
+                    deviceMgr.refreshDetectedGrippers();
+                    deviceMgr.attachDetectedGrippersToEmptySlots(false);
+                }
+            }
             for (auto& slotName : deviceMgr.getSlotNames()) activateCameraSlot(slotName);
             for (auto& slotName : deviceMgr.getGripperSlotNames()) activateGripperSlot(slotName);
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -649,7 +679,7 @@ int main(int argc, char* argv[]) {
                             if (eState.hasData) {
                                 GripperState gs;
                                 eGripper->getState(gs);
-                                server.updateGripperData(slotName, gs.position, gs.button1, gs.button2, gs.timestamp);
+                                server.updateGripperData(slotName, gs);
                                 if (server.isRecording()) {
                                     // 使用录制时刻的系统时间，避免 CAN 缓存的陈旧时间戳
                                     uint64_t recordTs = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -665,9 +695,9 @@ int main(int argc, char* argv[]) {
                         GripperState gs;
                         gslot->gripper->getState(gs);
                         if (gs.hasData) {
-                            server.updateGripperData(slotName, gs.position, gs.button1, gs.button2, gs.timestamp);
+                            server.updateGripperData(slotName, gs);
                             if (server.isRecording()) {
-                                server.recordGripper(slotName, gs.position, gs.button1, gs.button2, gs.timestamp);
+                                server.recordGripper(slotName, gs);
                             }
                         }
                     }

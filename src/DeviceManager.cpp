@@ -40,9 +40,29 @@ bool isLikelyEsp32CanBridgeVid(uint16_t vid) {
     // vid=0 表示系统没有提供 VID，也保留为低优先级候选。
     return vid == 0 || vid == 0x303A || vid == 0x1A86 || vid == 0x10C4 || vid == 0x0403 || vid == 0x067B;
 }
+
+bool isLikelyManualDataPortVid(uint16_t vid) {
+    return vid == 0x1A86 || vid == 0x10C4 || vid == 0x0403 || vid == 0x067B;
+}
 }
 
 // ---- 构造/析构 ----
+
+bool isManualSlotName(const std::string& side) {
+    return side == "left" || side == "right";
+}
+
+std::string firstEmptyManualSlot(const std::map<std::string, GripperSlot>& slots,
+                                 const std::set<std::string>& plannedSides) {
+    for (const auto& side : {std::string("left"), std::string("right")}) {
+        auto it = slots.find(side);
+        if (it == slots.end()) continue;
+        if (it->second.connected) continue;
+        if (plannedSides.count(side) > 0) continue;
+        return side;
+    }
+    return "";
+}
 
 DeviceManager::DeviceManager(const Config& cfg) : cfg_(cfg) {
     slots_["left"]  = DeviceSlot("left");
@@ -103,7 +123,6 @@ bool DeviceManager::refreshDetectedCameras() {
         return !detectedDevices_.empty();
     }
     lastCameraRefreshUs_ = nowUs;
-    fprintf(stderr, "[DeviceManager] 刷新相机检测列表（不重建槽位）...\n");
 
     // 这里只更新检测列表，不关闭 slots_ 中已经打开的相机对象。
     // 主采集线程在服务启动时会持有相机指针；如果扫描按钮直接重置这些对象，
@@ -131,8 +150,6 @@ bool DeviceManager::refreshDetectedCameras() {
         slot.deviceType = "none";
     }
 
-    fprintf(stderr, "[DeviceManager] 当前检测到 %d 个相机设备 (%d Orbbec, %d Hikvision)\n",
-            (int)detectedDevices_.size(), getOrbbecCount(), getHikvisionCount());
     return !detectedDevices_.empty();
 }
 
@@ -279,7 +296,17 @@ bool DeviceManager::refreshDetectedGrippers() {
         std::string port = slot.gripper->getPortName();
         bool portStillPresent = !port.empty() && detectedManualPorts.count(port) > 0;
         bool gripperAlive = slot.gripper->isConnected();
-        if (portStillPresent && gripperAlive) continue;
+        if (gripperAlive) {
+            if (!port.empty() && !portStillPresent) {
+                DetectedGripper dg;
+                dg.type = "manual";
+                dg.port = port;
+                dg.connected = true;
+                detectedGrippers_.push_back(dg);
+                detectedManualPorts.insert(port);
+            }
+            continue;
+        }
 
         fprintf(stderr, "[DeviceManager] %s 手动夹爪已断开，等待重新连接 (%s)\n",
                 kv.first.c_str(), port.c_str());
@@ -309,20 +336,62 @@ bool DeviceManager::refreshDetectedGrippers() {
 }
 
 bool DeviceManager::attachDetectedGrippersToEmptySlots(bool allowElectricScan) {
+    bool manualNeedsAttach = false;
+    for (const auto& side : {std::string("left"), std::string("right")}) {
+        auto it = gripperSlots_.find(side);
+        if (it != gripperSlots_.end() && (!it->second.connected || !it->second.gripper)) {
+            manualNeedsAttach = true;
+            break;
+        }
+    }
+    if (!manualNeedsAttach && !allowElectricScan) return false;
+
+    uint64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    constexpr uint64_t kManualOpenRetryCooldownUs = 15000000ULL;
+
     // 手动夹爪：按端口重新枚举后，只补挂当前为空的左右槽位。
     auto portInfos = UmiGripper::enumerateComPortsWithVid();
-    std::map<std::string, std::string> manualPortsBySide;
+    struct ManualPortCandidate {
+        std::string side;
+        std::string port;
+    };
+    std::vector<ManualPortCandidate> manualCandidates;
     for (const auto& info : portInfos) {
-        if (info.vid == 0x0E01) manualPortsBySide["left"] = info.portName;
-        else if (info.vid == 0x0E02) manualPortsBySide["right"] = info.portName;
+        if (info.vid == 0x0E01) manualCandidates.push_back({"left", info.portName});
+        else if (info.vid == 0x0E02) manualCandidates.push_back({"right", info.portName});
+    }
+    if (!manualCandidates.empty()) {
+        for (const auto& info : portInfos) {
+            if (isLikelyManualDataPortVid(info.vid)) {
+                manualCandidates.push_back({"unknown", info.portName});
+            }
+        }
     }
 
     bool changed = false;
-    for (const auto& side : {std::string("left"), std::string("right")}) {
+    std::set<std::string> plannedManualSides;
+    std::set<std::string> usedManualPorts;
+    for (const auto& kv : gripperSlots_) {
+        if (kv.second.connected && kv.second.gripper) {
+            usedManualPorts.insert(kv.second.gripper->getPortName());
+            if (kv.second.gripperType == "manual") plannedManualSides.insert(kv.first);
+        }
+    }
+
+    for (const auto& c : manualCandidates) {
+        if (usedManualPorts.count(c.port) > 0) continue;
+        auto retryIt = manualOpenRetryAfterUs_.find(c.port);
+        if (!allowElectricScan && retryIt != manualOpenRetryAfterUs_.end() && retryIt->second > nowUs) continue;
+
+        std::string side = c.side;
+        if (!isManualSlotName(side) || gripperSlots_[side].connected || plannedManualSides.count(side) > 0) {
+            side = firstEmptyManualSlot(gripperSlots_, plannedManualSides);
+        }
+        if (side.empty()) continue;
+
         auto& slot = gripperSlots_[side];
         if (slot.connected) continue;
-        auto it = manualPortsBySide.find(side);
-        if (it == manualPortsBySide.end()) continue;
 
         UmiGripper* gripper = dynamic_cast<UmiGripper*>(slot.gripper.get());
         if (!gripper) {
@@ -330,13 +399,61 @@ bool DeviceManager::attachDetectedGrippersToEmptySlots(bool allowElectricScan) {
             gripper = fresh.get();
             slot.gripper = std::move(fresh);
         }
-        if (gripper->open(it->second)) {
+        if (gripper->open(c.port)) {
             slot.gripperType = "manual";
             slot.connected = true;
+            usedManualPorts.insert(c.port);
+            plannedManualSides.insert(side);
+            manualOpenRetryAfterUs_.erase(c.port);
             changed = true;
             fprintf(stderr, "[DeviceManager] 热插拔补挂 %s 夹爪槽: 手动夹爪 (%s)\n",
-                    side.c_str(), it->second.c_str());
+                    side.c_str(), c.port.c_str());
+        } else {
+            manualOpenRetryAfterUs_[c.port] = nowUs + kManualOpenRetryCooldownUs;
+            fprintf(stderr, "[DeviceManager] 热插拔手动夹爪候选 %s 打开失败，继续尝试其他串口\n",
+                    c.port.c_str());
         }
+    }
+
+    if (manualCandidates.empty()) {
+    for (const auto& port : UmiGripper::scanSerialPorts()) {
+        if (usedManualPorts.count(port) > 0) continue;
+        auto retryIt = manualOpenRetryAfterUs_.find(port);
+        if (!allowElectricScan && retryIt != manualOpenRetryAfterUs_.end() && retryIt->second > nowUs) continue;
+
+        std::string targetSide = firstEmptyManualSlot(gripperSlots_, plannedManualSides);
+        if (targetSide.empty()) break;
+
+        auto gripper = std::make_unique<UmiGripper>();
+        if (!gripper->open(port)) {
+            manualOpenRetryAfterUs_[port] = nowUs + kManualOpenRetryCooldownUs;
+            continue;
+        }
+
+        std::string detectedSide = gripper->getHandSide();
+        if (isManualSlotName(detectedSide) &&
+            !gripperSlots_[detectedSide].connected &&
+            plannedManualSides.count(detectedSide) == 0) {
+            targetSide = detectedSide;
+        }
+
+        gripperSlots_[targetSide].gripperType = "manual";
+        gripperSlots_[targetSide].gripper = std::move(gripper);
+        gripperSlots_[targetSide].connected = true;
+
+        DetectedGripper dg;
+        dg.type = "manual";
+        dg.port = port;
+        dg.connected = true;
+        detectedGrippers_.push_back(dg);
+
+        usedManualPorts.insert(port);
+        plannedManualSides.insert(targetSide);
+        manualOpenRetryAfterUs_.erase(port);
+        changed = true;
+        fprintf(stderr, "[DeviceManager] 热插拔补挂 %s 夹爪槽: 未知 VID 手动夹爪 (%s)\n",
+                targetSide.c_str(), port.c_str());
+    }
     }
 
     bool hasConnectedElectric = false;
@@ -353,14 +470,24 @@ bool DeviceManager::attachDetectedGrippersToEmptySlots(bool allowElectricScan) {
         if (kv.second.connected && kv.second.gripper) usedPorts.insert(kv.second.gripper->getPortName());
     }
     std::vector<std::string> esp32CanPorts;
-    for (const auto& info : portInfos) {
-        if (isManualGripperVid(info.vid)) continue;
-        if (usedPorts.count(info.portName)) continue;
-        if (isLikelyEsp32CanBridgeVid(info.vid)) esp32CanPorts.push_back(info.portName);
+    if (manualCandidates.empty()) {
+        for (const auto& info : portInfos) {
+            if (isManualGripperVid(info.vid)) continue;
+            if (usedPorts.count(info.portName)) continue;
+            if (isLikelyEsp32CanBridgeVid(info.vid)) esp32CanPorts.push_back(info.portName);
+        }
     }
-    if (esp32CanPorts.empty()) {
+    if (manualCandidates.empty() && esp32CanPorts.empty()) {
         for (const auto& port : UmiGripper::scanSerialPorts()) {
             if (usedPorts.count(port)) continue;
+            bool isKnownManualPort = false;
+            for (const auto& info : portInfos) {
+                if (info.portName == port && isManualGripperVid(info.vid)) {
+                    isKnownManualPort = true;
+                    break;
+                }
+            }
+            if (isKnownManualPort) continue;
             esp32CanPorts.push_back(port);
         }
     }
@@ -828,6 +955,30 @@ const GripperSlot* DeviceManager::getGripperSlot(const std::string& position) co
     return it != gripperSlots_.end() ? &it->second : nullptr;
 }
 
+bool DeviceManager::swapManualGripperSlots() {
+    std::lock_guard<std::mutex> lock(detectedInfoMutex_);
+    auto leftIt = gripperSlots_.find("left");
+    auto rightIt = gripperSlots_.find("right");
+    if (leftIt == gripperSlots_.end() || rightIt == gripperSlots_.end()) return false;
+
+    auto isSwappableManualSlot = [](const GripperSlot& slot) {
+        return !slot.connected || slot.gripperType == "none" || slot.gripperType == "manual";
+    };
+    if (!isSwappableManualSlot(leftIt->second) || !isSwappableManualSlot(rightIt->second)) {
+        fprintf(stderr, "[DeviceManager] 左右夹爪交换被拒绝：left=%s right=%s，仅允许交换手动夹爪槽\n",
+                leftIt->second.gripperType.c_str(), rightIt->second.gripperType.c_str());
+        return false;
+    }
+
+    using std::swap;
+    swap(leftIt->second.gripperType, rightIt->second.gripperType);
+    swap(leftIt->second.gripper, rightIt->second.gripper);
+    swap(leftIt->second.connected, rightIt->second.connected);
+
+    fprintf(stderr, "[DeviceManager] 已交换左右手动夹爪槽位\n");
+    return true;
+}
+
 std::vector<std::string> DeviceManager::getGripperSlotNames() const {
     std::vector<std::string> names;
     for (auto& kv : gripperSlots_) names.push_back(kv.first);
@@ -877,6 +1028,19 @@ void DeviceManager::detectAndAssignGrippers() {
     }
 
     // 如果 SetupAPI 没找到，回退到逐个扫描串口并尝试打开
+    if (!candidates.empty()) {
+        for (const auto& info : portInfos) {
+            if (isLikelyManualDataPortVid(info.vid)) {
+                GripperCandidate gc;
+                gc.port = info.portName;
+                gc.side = "unknown";
+                candidates.push_back(gc);
+                fprintf(stderr, "[DeviceManager] manual gripper data port candidate: %s (VID=0x%04X PID=0x%04X)\n",
+                    info.portName.c_str(), info.vid, info.pid);
+            }
+        }
+    }
+
     if (candidates.empty()) {
         fprintf(stderr, "[DeviceManager] SetupAPI 未检测到夹爪 VID，回退到串口扫描...\n");
         auto ports = UmiGripper::scanSerialPorts();
@@ -899,12 +1063,60 @@ void DeviceManager::detectAndAssignGrippers() {
     }
 
     // 尝试电动夹爪（通过 CAN 适配器检测）
+    const bool hadManualCandidates = !candidates.empty();
+
+    // 先分配手动夹爪槽位，再检测电动夹爪。
+    // 新版手动夹爪可能同时暴露身份串口和数据串口；如果先扫描电动夹爪，
+    // 数据串口容易被误判为 ESP32-CAN 候选，导致启动慢或槽位没有及时分配。
+    std::set<std::string> assignedManualSidesBeforeElectric;
+    for (auto& c : candidates) {
+        if (!isManualSlotName(c.side) || assignedManualSidesBeforeElectric.count(c.side) > 0) {
+            c.side = firstEmptyManualSlot(gripperSlots_, assignedManualSidesBeforeElectric);
+        }
+        if (c.side.empty()) {
+            fprintf(stderr, "[DeviceManager] 手动夹爪没有可用槽位，跳过: %s\n", c.port.c_str());
+            continue;
+        }
+
+        auto& slot = gripperSlots_[c.side];
+        if (slot.connected) {
+            assignedManualSidesBeforeElectric.insert(c.side);
+            continue;
+        }
+        slot.gripperType = "manual";
+
+        auto gripper = std::make_unique<UmiGripper>();
+        fprintf(stderr, "[DeviceManager] 尝试打开手动夹爪候选: %s -> %s 槽\n",
+                c.port.c_str(), c.side.c_str());
+        if (gripper->open(c.port)) {
+            DetectedGripper dg;
+            dg.type = "manual";
+            dg.port = c.port;
+            dg.connected = true;
+            detectedGrippers_.push_back(dg);
+
+            slot.gripper = std::move(gripper);
+            slot.connected = true;
+            assignedManualSidesBeforeElectric.insert(c.side);
+            fprintf(stderr, "[DeviceManager] %s 夹爪槽: 手动夹爪 (%s)\n",
+                    c.side.c_str(), c.port.c_str());
+        } else {
+            fprintf(stderr, "[DeviceManager] 手动夹爪候选 %s 打开失败，未分配到 %s 槽\n",
+                    c.port.c_str(), c.side.c_str());
+        }
+    }
+
+    // 手动夹爪已经处理完，清空候选，避免后续旧分配循环重复打开串口。
+    candidates.clear();
+
     std::set<std::string> usedPorts;
     std::vector<std::string> esp32CanPorts;
-    for (const auto& info : portInfos) {
-        if (isManualGripperVid(info.vid)) continue;
-        if (usedPorts.count(info.portName)) continue;
-        if (isLikelyEsp32CanBridgeVid(info.vid)) esp32CanPorts.push_back(info.portName);
+    if (!hadManualCandidates) {
+        for (const auto& info : portInfos) {
+            if (isManualGripperVid(info.vid)) continue;
+            if (usedPorts.count(info.portName)) continue;
+            if (isLikelyEsp32CanBridgeVid(info.vid)) esp32CanPorts.push_back(info.portName);
+        }
     }
 
     // 尝试加载 CAN SDK 并检测电动夹爪
@@ -955,26 +1167,6 @@ void DeviceManager::detectAndAssignGrippers() {
         fprintf(stderr, "[DeviceManager] ECanVci64.dll 未找到，跳过 CAN 电动夹爪检测\n");
     }
 
-    // 按 USB VID 固定分配左右手
-    for (auto& c : candidates) {
-        auto& slot = gripperSlots_[c.side];
-        slot.gripperType = "manual";
-
-        auto gripper = std::make_unique<UmiGripper>();
-        if (gripper->open(c.port)) {
-            DetectedGripper dg;
-            dg.type = "manual";
-            dg.port = c.port;
-            dg.connected = true;
-            detectedGrippers_.push_back(dg);
-
-            slot.gripper = std::move(gripper);
-            slot.connected = true;
-            fprintf(stderr, "[DeviceManager] %s 夹爪槽: 手动夹爪 (%s, VID固定)\n",
-                    c.side.c_str(), c.port.c_str());
-        }
-    }
-
     usedPorts.clear();
     for (const auto& kv : gripperSlots_) {
         if (kv.second.connected && kv.second.gripper) {
@@ -1008,7 +1200,7 @@ void DeviceManager::detectAndAssignGrippers() {
             canAvailable = false;
         }
     }
-    if (!electricSlot.empty() && !gripperSlots_[electricSlot].connected) {
+    if (!electricSlot.empty() && !gripperSlots_[electricSlot].connected && !hadManualCandidates) {
         if (esp32CanPorts.empty()) {
             for (const auto& port : UmiGripper::scanSerialPorts()) {
                 if (usedPorts.count(port)) continue;
@@ -1100,7 +1292,7 @@ std::string DeviceManager::toJson() const {
         if (gripperConnected) {
             gripperPort = kv.second.gripper->getPortName();
             if (kv.second.gripperType == "manual") {
-                gripperConnected = !gripperPort.empty() && detectedGripperPorts.count(gripperPort) > 0;
+                gripperConnected = kv.second.gripper->isConnected();
             } else if (kv.second.gripperType == "electric") {
                 auto* electric = dynamic_cast<ElectricGripper*>(kv.second.gripper.get());
                 gripperConnected = electric && electric->isConnected()

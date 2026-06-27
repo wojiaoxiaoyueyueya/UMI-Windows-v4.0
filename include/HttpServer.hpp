@@ -72,6 +72,28 @@ struct GripperWebState {
     uint8_t button2 = 255;
     uint64_t timestamp = 0;
     bool   hasData = false;
+    bool hasExtendedData = false;
+    uint8_t protocolVersion = 0;
+    uint8_t payloadLength = 0;
+    uint8_t deviceId = 0;
+    uint32_t encoderRaw = 0;
+    uint32_t positionRaw = 0;
+    bool positionFallback = false;
+    uint8_t lastV4Command = 0;
+    bool hasDeviceParams = false;
+    uint16_t txAddress = 0;
+    uint8_t txFrequency = 0;
+    uint16_t rxAddress = 0;
+    uint8_t rxFrequency = 0;
+    uint8_t ledR = 0;
+    uint8_t ledG = 0;
+    uint8_t ledB = 0;
+    uint8_t ledBrightness = 0;
+    int16_t accel[3] = {0, 0, 0};
+    int16_t gyro[3] = {0, 0, 0};
+    int16_t force[12] = {};
+    uint8_t forceCount = 0;
+    int forceMaxAbs = 0;
     // 夹爪采样帧率统计：用于前端显示真实夹爪数据刷新速度。
     uint64_t captureCount = 0;
     double   captureFps = 0;
@@ -179,8 +201,11 @@ struct RecordingState {
     std::vector<std::string> warnings; // recording warnings for frontend display
 
     // 反向槽位映射：后端真实槽位名 -> 前端显示位置名。
-    // 开始录制时由前端 slotMapping 填充，用于保证目录命名和页面选择一致。
+    // 开始录制时由前端 slotMapping 填充，用于保证摄像头目录命名和页面选择一致。
     std::map<std::string, std::string> backendToDisplay;
+
+    // 手动/电动夹爪使用独立映射，避免摄像头左右交换影响夹爪保存位置。
+    std::map<std::string, std::string> gripperBackendToDisplay;
 
     // 目录名 -> 槽位录制状态，例如 "Left-umi" 对应左手录制目录。
     std::map<std::string, SlotState> slots;
@@ -231,8 +256,8 @@ public:
 
     // 单摄像头（向后兼容）
     void updateColorFrame(const cv::Mat& mat);
-    void updateGripperData(const std::string& slot, float position, uint8_t button1, uint8_t button2, uint64_t timestamp);
-    void recordGripper(const std::string& slot, float position, uint8_t button1, uint8_t button2, uint64_t timestampUs);
+    void updateGripperData(const std::string& slot, const GripperState& state);
+    void recordGripper(const std::string& slot, const GripperState& state);
     void recordElectricGripper(const std::string& slot, float positionDeg, float velocity, float current,
                                float motorTemp, float mosTemp, uint8_t errorCode, uint64_t timestampUs);
     void setUmiGripper(const std::string& slot, UmiGripper* mgr) { umiGrippers_[slot] = mgr; gripperWebStates_[slot]; }
@@ -324,6 +349,7 @@ private:
                         const std::vector<std::string>& slots = {},
                         const std::vector<std::string>& streams = {},
                         const std::map<std::string, std::string>& slotMapping = {},
+                        const std::map<std::string, std::string>& gripperSlotMapping = {},
                         const std::string& saveMode = "strict");
     bool stopRecording();
     bool cancelFinalize(const std::string& sessionId);

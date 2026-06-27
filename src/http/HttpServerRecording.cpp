@@ -19,17 +19,21 @@ static uint64_t toSessionTimeUs(uint64_t timestampUs, uint64_t sessionStartUs) {
     return timestampUs >= sessionStartUs ? timestampUs - sessionStartUs : 0;
 }
 
-void HttpServer::recordGripper(const std::string& slot, float position, uint8_t button1, uint8_t button2, uint64_t timestampUs) {
+void HttpServer::recordGripper(const std::string& slot, const GripperState& state) {
     std::lock_guard<std::mutex> lock(recordingState_.mutex);
     if (!recordingState_.isRecording) return;
 
+    std::string displayPos = slot;
+    auto gtdIt = recordingState_.gripperBackendToDisplay.find(slot);
+    if (gtdIt != recordingState_.gripperBackendToDisplay.end()) displayPos = gtdIt->second;
+
     // 判断当前槽位的夹爪数据是否被本次录制任务勾选，未勾选时直接跳过。
     if (!recordingState_.selectedStreams.empty()) {
-        std::string key = slot + "-gripper";
+        std::string key = displayPos + "-gripper";
         if (recordingState_.selectedStreams.find(key) == recordingState_.selectedStreams.end()) return;
     }
 
-    std::string folder = RecordingState::positionToFolder(slot);
+    std::string folder = RecordingState::positionToFolder(displayPos);
     auto it = recordingState_.slots.find(folder);
     if (it == recordingState_.slots.end()) return;
 
@@ -41,18 +45,51 @@ void HttpServer::recordGripper(const std::string& slot, float position, uint8_t 
         winfs::mkdirp(ss.slotDir + "/gripper_data");
         ss.gripperCsvFile.open(winfs::utf8ToAnsi(ss.slotDir + "/gripper_data/gripper.csv"));
         if (ss.gripperCsvFile.is_open())
-            ss.gripperCsvFile << "timestamp_us,session_time_us,slot,position,button1,button2\n";
+            ss.gripperCsvFile
+                << "timestamp_us,session_time_us,slot,protocol_name,protocol_version,"
+                << "position,button1,button2,payload_len,device_id,encoder_raw,position_raw,position_fallback,"
+                << "accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,"
+                << "force_count,force_max_abs,force_0,force_1,force_2,force_3,force_4,force_5,"
+                << "force_6,force_7,force_8,force_9,force_10,force_11,"
+                << "tx_address,tx_frequency,rx_address,rx_frequency,"
+                << "led_r,led_g,led_b,led_brightness,last_v4_command\n";
     }
     if (!ss.gripperCsvFile.is_open()) return;
 
+    uint64_t timestampUs = state.timestamp;
+    const char* protocolName = "UMI-2.0";
     ss.gripperCsvFile << timestampUs
         << "," << toSessionTimeUs(timestampUs, recordingState_.startTime)
-        << "," << slot
-        << "," << std::fixed << std::setprecision(6) << position
-        << "," << (int)button1 << "," << (int)button2 << "\n";
+        << "," << displayPos
+        << "," << protocolName
+        << "," << (int)state.protocolVersion
+        << "," << std::fixed << std::setprecision(6) << state.position
+        << "," << (int)state.button1
+        << "," << (int)state.button2
+        << "," << (int)state.payloadLength
+        << "," << (int)state.deviceId
+        << "," << (unsigned long)state.encoderRaw
+        << "," << (unsigned long)state.positionRaw
+        << "," << (state.positionFallback ? 1 : 0)
+        << "," << state.accel[0] << "," << state.accel[1] << "," << state.accel[2]
+        << "," << state.gyro[0] << "," << state.gyro[1] << "," << state.gyro[2]
+        << "," << (int)state.forceCount
+        << "," << state.forceMaxAbs;
+    for (int i = 0; i < 12; ++i) ss.gripperCsvFile << "," << state.force[i];
+    ss.gripperCsvFile
+        << "," << state.txAddress
+        << "," << (int)state.txFrequency
+        << "," << state.rxAddress
+        << "," << (int)state.rxFrequency
+        << "," << (int)state.ledR
+        << "," << (int)state.ledG
+        << "," << (int)state.ledB
+        << "," << (int)state.ledBrightness
+        << "," << (int)state.lastV4Command
+        << "\n";
     ss.gripperCount++;
-    if (position < ss.gripperMinPos) ss.gripperMinPos = position;
-    if (position > ss.gripperMaxPos) ss.gripperMaxPos = position;
+    if (state.position < ss.gripperMinPos) ss.gripperMinPos = state.position;
+    if (state.position > ss.gripperMaxPos) ss.gripperMaxPos = state.position;
 }
 
 void HttpServer::recordElectricGripper(const std::string& slot, float positionDeg, float velocity, float current,
@@ -60,12 +97,16 @@ void HttpServer::recordElectricGripper(const std::string& slot, float positionDe
     std::lock_guard<std::mutex> lock(recordingState_.mutex);
     if (!recordingState_.isRecording) return;
 
+    std::string displayPos = slot;
+    auto gtdIt = recordingState_.gripperBackendToDisplay.find(slot);
+    if (gtdIt != recordingState_.gripperBackendToDisplay.end()) displayPos = gtdIt->second;
+
     if (!recordingState_.selectedStreams.empty()) {
-        std::string key = slot + "-gripper";
+        std::string key = displayPos + "-gripper";
         if (recordingState_.selectedStreams.find(key) == recordingState_.selectedStreams.end()) return;
     }
 
-    std::string folder = RecordingState::positionToFolder(slot);
+    std::string folder = RecordingState::positionToFolder(displayPos);
     auto it = recordingState_.slots.find(folder);
     if (it == recordingState_.slots.end()) return;
 
@@ -82,7 +123,7 @@ void HttpServer::recordElectricGripper(const std::string& slot, float positionDe
 
     ss.gripperCsvFile << timestampUs
         << "," << toSessionTimeUs(timestampUs, recordingState_.startTime)
-        << "," << slot
+        << "," << displayPos
         << "," << std::fixed << std::setprecision(4) << positionDeg
         << "," << std::fixed << std::setprecision(4) << velocity
         << "," << std::fixed << std::setprecision(4) << current
@@ -324,6 +365,7 @@ bool HttpServer::startRecording(const std::vector<std::string>& types,
                                const std::vector<std::string>& slots,
                                const std::vector<std::string>& streams,
                                const std::map<std::string, std::string>& slotMapping,
+                               const std::map<std::string, std::string>& gripperSlotMapping,
                                const std::string& saveMode) {
     // 保存队列独立运行，不需要在这里处理旧的 finalize 线程。
 
@@ -349,6 +391,7 @@ bool HttpServer::startRecording(const std::vector<std::string>& types,
     recordingState_.selectedStreams.clear();
     recordingState_.warnings.clear();
     recordingState_.backendToDisplay.clear();
+    recordingState_.gripperBackendToDisplay.clear();
     for (const auto& s : streams) recordingState_.selectedStreams.insert(s);
 
     // 会话目录采用懒创建策略，只有真正收到视频或夹爪数据时才落盘。
@@ -370,6 +413,17 @@ bool HttpServer::startRecording(const std::vector<std::string>& types,
     for (const char* pos : {"left", "right", "head"}) {
         if (recordingState_.backendToDisplay.find(pos) == recordingState_.backendToDisplay.end()) {
             recordingState_.backendToDisplay[pos] = pos;
+        }
+    }
+
+    // 夹爪映射独立于摄像头映射。摄像头左右交换只影响视频保存位置；
+    // 手动夹爪交换或后续夹爪显示映射只影响 gripper.csv 的保存位置。
+    for (const auto& kv : gripperSlotMapping) {
+        recordingState_.gripperBackendToDisplay[kv.second] = kv.first;
+    }
+    for (const char* pos : {"left", "right", "extra"}) {
+        if (recordingState_.gripperBackendToDisplay.find(pos) == recordingState_.gripperBackendToDisplay.end()) {
+            recordingState_.gripperBackendToDisplay[pos] = pos;
         }
     }
 
@@ -400,33 +454,15 @@ bool HttpServer::startRecording(const std::vector<std::string>& types,
             auto* slot = deviceManager_->getSlot(backendSlot);
             bool hasCamera = (slot && slot->connected);
 
-            // 夹爪独立于相机映射，需要遍历所有夹爪槽位寻找与当前显示位置匹配的设备。
-            // 手动夹爪通过 USB VID 固定左右手，不跟随相机 slotMapping 改变。
+            // 夹爪独立于相机映射：只按 gripperSlotMapping 查找当前显示位置对应的后端夹爪槽。
+            // 不能兜底拿任意已连接夹爪，否则两个夹爪同 VID 或只连接一只时会保存成重复的左/右夹爪数据。
             bool hasGripper = false;
-            auto* gslot = deviceManager_->getGripperSlot(displayPos);
-            fprintf(stderr, "[RECORDING] Gripper check displayPos='%s' backendSlot='%s': "
-                "gslot=%p connected=%d\n",
-                displayPos, backendSlot.c_str(),
-                (void*)gslot, gslot ? (int)gslot->connected : -1);
+            std::string backendGripperSlot = displayPos;
+            auto git = gripperSlotMapping.find(displayPos);
+            if (git != gripperSlotMapping.end()) backendGripperSlot = git->second;
+            auto* gslot = deviceManager_->getGripperSlot(backendGripperSlot);
             if (gslot && gslot->connected) {
                 hasGripper = true;
-            } else {
-                gslot = deviceManager_->getGripperSlot(backendSlot);
-                fprintf(stderr, "[RECORDING] Gripper fallback backendSlot='%s': gslot=%p connected=%d\n",
-                    backendSlot.c_str(), (void*)gslot, gslot ? (int)gslot->connected : -1);
-                if (gslot && gslot->connected) {
-                    hasGripper = true;
-                } else {
-                    for (auto& gkv : deviceManager_->getGripperSlotNames()) {
-                        auto* gs = deviceManager_->getGripperSlot(gkv);
-                        if (gs && gs->connected) {
-                            hasGripper = true;
-                            gslot = gs;
-                            fprintf(stderr, "[RECORDING] Found connected gripper on slot '%s'\n", gkv.c_str());
-                            break;
-                        }
-                    }
-                }
             }
 
             if (!hasCamera && !hasGripper) {
@@ -458,9 +494,6 @@ bool HttpServer::startRecording(const std::vector<std::string>& types,
             }
 
             bool isOrbbec = (ss.deviceType == "orbbec");
-
-            fprintf(stderr, "[RECORDING] Display '%s' -> backend '%s' -> folder '%s' (type=%s)\n",
-                    displayPos, backendSlot.c_str(), folder.c_str(), ss.deviceType.c_str());
 
             recordingState_.slots[folder] = std::move(ss);
         }

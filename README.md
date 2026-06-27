@@ -118,7 +118,7 @@ data_converted/                # 转换后的训练数据
 如果你是第一次使用，先安装 Git，然后执行：
 
 ```bash
-git clone <仓库地址> ManualGripper
+git clone https://github.com/wojiaoxiaoyueyueya/UMI-Windows-v4.0.git ManualGripper
 cd ManualGripper
 ```
 
@@ -381,6 +381,17 @@ http://localhost:8080/index_old.html
 
 包含夹爪监控、数据采集、数据转换、夹爪控制、电动夹爪控制、剪刀石头布和夹爪遥控。
 
+### 左右设备调整
+
+摄像头和手动夹爪是两套独立调整逻辑，不要混为一谈：
+
+1. “夹爪监控”页左侧的“交换左右摄像头”只调整摄像头画面、视频流和后续视频保存位置，不会改变手动夹爪左右槽位。
+2. “夹爪控制”页左侧的“交换左右手动夹爪”只交换 `left/right` 手动夹爪槽位，夹爪监控、夹爪控制、夹爪遥控和夹爪 CSV 保存会同步更新。
+3. 如果设备本身 VID 正常区分 `VID_0E01=左手`、`VID_0E02=右手`，系统会自动按左右分配，不需要手动交换。
+4. 如果两个夹爪都烧成左手或都烧成右手，系统会先按检测顺序分配；如果物理左右反了，再点“交换左右手动夹爪”校正。
+5. 电动夹爪暂不参与左右手动夹爪交换。两个手动夹爪都在线时，电动夹爪会挂载到 `extra` 槽。
+6. 录制或保存过程中不能交换左右手动夹爪，避免同一个会话内左右物理设备发生变化。
+
 ### 电动夹爪控制
 
 1. 确认 GCAN 适配器或 ESP32-CAN 串口桥、电动夹爪供电正常。
@@ -447,6 +458,14 @@ timestamps.csv
 ```text
 gripper.csv
 ```
+
+保存映射规则：
+
+- 摄像头保存使用当前“交换左右摄像头”后的显示映射。例如页面左侧显示的相机会保存到 `Left-umi/`。
+- 手动夹爪保存使用当前“交换左右手动夹爪”后的夹爪槽位。例如交换后物理右手夹爪显示为左夹爪，则它会保存到 `Left-umi/gripper_data/gripper.csv`。
+- 摄像头映射和夹爪映射互不影响，三台摄像头和两个手动夹爪可以分别调整后再开始录制。
+- 程序不会再用“任意已连接夹爪”兜底写入左右目录，避免两个目录都保存同一个左夹爪或右夹爪数据。
+- `gripper.csv` 中的 `slot` 字段也会写入调整后的显示位置：`left` 或 `right`。
 
 转换后的数据默认保存到：
 
@@ -642,7 +661,7 @@ git push
 别人拉取：
 
 ```bash
-git clone <仓库地址> ManualGripper
+git clone https://github.com/wojiaoxiaoyueyueya/UMI-Windows-v4.0.git ManualGripper
 cd ManualGripper
 python -m pip install -r requirements.txt
 ```
@@ -681,3 +700,89 @@ README.md
 
 如果仓库是公开仓库，请确认海康、Orbbec、GCAN 等 SDK 是否允许公开分发。  
 如果不确定，建议使用私有仓库，或者只提交 `lib/` 目录结构和放置说明，让使用者自己从厂商官网下载 SDK。
+
+## 17. UMI 手动夹爪 V1.0 / 2.0 说明
+
+项目当前手动夹爪统一使用 UMI 2.0/V4.0 新协议：
+
+```text
+UMI 2.0：新版 AA 55 帧协议，支持磁编码、按键、IMU、LED、力传感、设备参数查询。
+```
+
+UMI 2.0 有线 CDC 优先通过 USB VID 区分左右手：
+
+```text
+VID_0E01 = 左手手动夹爪
+VID_0E02 = 右手手动夹爪
+```
+
+如果两个夹爪固件都烧成 `VID_0E01`，或都烧成 `VID_0E02`，系统不会丢弃第二个设备，而是按枚举顺序把第一个分配到 `left`，第二个分配到 `right`。如果设备本身就是一左一右，则正常按 VID 分配。如果同时还有一个 CAN 电动夹爪，电动夹爪会挂载到 `extra` 槽位，电动夹爪控制、剪刀石头布、夹爪遥控页面都会自动查找可用电动夹爪。
+
+### 17.1 设备识别逻辑
+
+页面高频读取 `/api/devices` 时只返回缓存，不再每次进入页面都重新扫描硬件。这样进入设备控制页会更快，也能减少相机 SDK 和串口反复枚举导致的卡顿。
+
+设备更新由两处负责：
+
+```text
+后台热插拔线程：周期性轻量刷新设备列表，并自动补挂新插入的手动夹爪。
+重新扫描设备按钮：执行一次明确的完整扫描，适合更换相机、电动夹爪或 CAN 适配器后使用。
+```
+
+### 17.2 UMI 2.0 数据展示
+
+夹爪监控页面保持简洁监控，只显示最大/最小/当前闭合度进度条和两个按钮状态。
+
+夹爪控制页面用于查看更完整的 UMI 2.0 数据。如果连接的是 UMI 2.0，会显示以下详细字段：
+
+```text
+磁编码浮点值
+加速度 XYZ
+陀螺仪 XYZ
+LED RGB 和亮度
+射频发射端地址/频段
+射频接收端地址/频段
+最后响应命令
+数据帧率
+力传感完整数组
+```
+
+页面还提供以下单独查询功能：
+
+```text
+单次状态：发送 0x03，读取一次当前状态。
+读取参数：发送 0x13，读取射频地址和频段等设备参数。
+力传感置零：发送 0x12，用于力传感器清零。
+恢复连续：发送 0x01，恢复连续上报。
+```
+
+夹爪控制页面还提供“两点显示校准”。该功能只改变页面上的闭合度显示和进度条，不改变后端采集和 CSV 保存的原始数据。标定时先让夹爪最大张开，点击“当前设为最大”，再让夹爪最小闭合，点击“当前设为最小”。例如最大张开原始显示 `2%`、最小闭合原始显示 `98%` 时，页面会把 `2%` 映射为 `0%`，把 `98%` 映射为 `100%`，中间数值按比例显示。
+
+### 17.3 手动夹爪 CSV 保存格式
+
+采集会在 `gripper_data/gripper.csv` 中保存完整 UMI 2.0 手动夹爪数据，包括磁编码、IMU、力传感、LED 状态和设备参数。
+
+主要字段包括：
+
+```text
+timestamp_us, session_time_us, slot
+protocol_name, protocol_version
+position, button1, button2
+payload_len, device_id
+encoder_raw, position_raw, position_fallback
+accel_x, accel_y, accel_z
+gyro_x, gyro_y, gyro_z
+force_count, force_max_abs, force_0 ... force_11
+tx_address, tx_frequency, rx_address, rx_frequency
+led_r, led_g, led_b, led_brightness
+last_v4_command
+```
+
+其中：
+
+```text
+protocol_name = UMI-2.0
+position      = 归一化闭合位置
+position_raw  = UMI 2.0 磁编码浮点值放大 10000 后的稳定值
+encoder_raw   = UMI 2.0 磁编码 4 字节原始 bit pattern
+```

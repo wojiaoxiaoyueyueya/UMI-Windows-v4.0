@@ -43,15 +43,12 @@ void HttpServer::setupRoutes() {
 
     // MJPEG 彩色视频流
     svr_->Get("/stream/color", [this](const httplib::Request&, httplib::Response& res) {
-        fprintf(stderr, "[调试] 浏览器请求了 /stream/color\n");
         res.set_header("Cache-Control", "no-cache, no-store, must-revalidate");
         res.set_header("Access-Control-Allow-Origin", "*");
         res.set_chunked_content_provider(
             "multipart/x-mixed-replace; boundary=frameboundary",
             [this](size_t, httplib::DataSink& sink) -> bool {
-                fprintf(stderr, "[调试] MJPEG推流开始\n");
                 uint64_t lastSentTs = 0;
-                int sendCount = 0;
                 while (running_) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(STREAM_INTERVAL_MS));
                     std::vector<uchar> jpeg;
@@ -69,8 +66,6 @@ void HttpServer::setupRoutes() {
                     if (!sink.write(header.c_str(), header.size())) return false;
                     if (!sink.write(reinterpret_cast<const char*>(jpeg.data()), jpeg.size())) return false;
                     if (!sink.write("\r\n", 2)) return false;
-                    sendCount++;
-                    if (sendCount <= 3) fprintf(stderr, "[调试] MJPEG发送帧 #%d, size=%zu\n", sendCount, jpeg.size());
                 }
                 return false;
             }
@@ -194,13 +189,34 @@ void HttpServer::setupRoutes() {
         std::lock_guard<std::mutex> lock(gs.mutex);
         auto git = umiGrippers_.find(slot);
         bool connected = (git != umiGrippers_.end() && git->second && git->second->isConnected());
-        char json[512];
+        char json[4096];
         snprintf(json, sizeof(json),
             "{\"has\":true,\"connected\":%s,\"slot\":\"%s\","
-            "\"position\":%.6f,\"button1\":%d,\"button2\":%d,\"timestamp\":%lu}",
+            "\"position\":%.6f,\"button1\":%d,\"button2\":%d,\"timestamp\":%lu,"
+            "\"captureFps\":%.2f,\"extended\":%s,\"protocolVersion\":%d,"
+            "\"payloadLength\":%d,\"deviceId\":%d,\"encoderRaw\":%lu,"
+            "\"positionRaw\":%lu,\"positionFallback\":%s,"
+            "\"lastV4Command\":%d,\"hasDeviceParams\":%s,"
+            "\"txAddress\":%u,\"txFrequency\":%u,\"rxAddress\":%u,\"rxFrequency\":%u,"
+            "\"ledR\":%u,\"ledG\":%u,\"ledB\":%u,\"ledBrightness\":%u,"
+            "\"accel\":[%d,%d,%d],\"gyro\":[%d,%d,%d],"
+            "\"force\":[%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d],"
+            "\"forceCount\":%d,\"forceMaxAbs\":%d}",
             connected ? "true" : "false", slot.c_str(),
             gs.position, (int)gs.button1, (int)gs.button2,
-            (unsigned long)gs.timestamp);
+            (unsigned long)gs.timestamp,
+            gs.captureFps, gs.hasExtendedData ? "true" : "false", (int)gs.protocolVersion,
+            (int)gs.payloadLength, (int)gs.deviceId, (unsigned long)gs.encoderRaw,
+            (unsigned long)gs.positionRaw, gs.positionFallback ? "true" : "false",
+            (int)gs.lastV4Command, gs.hasDeviceParams ? "true" : "false",
+            (unsigned)gs.txAddress, (unsigned)gs.txFrequency, (unsigned)gs.rxAddress, (unsigned)gs.rxFrequency,
+            (unsigned)gs.ledR, (unsigned)gs.ledG, (unsigned)gs.ledB, (unsigned)gs.ledBrightness,
+            (int)gs.accel[0], (int)gs.accel[1], (int)gs.accel[2],
+            (int)gs.gyro[0], (int)gs.gyro[1], (int)gs.gyro[2],
+            (int)gs.force[0], (int)gs.force[1], (int)gs.force[2], (int)gs.force[3],
+            (int)gs.force[4], (int)gs.force[5], (int)gs.force[6], (int)gs.force[7],
+            (int)gs.force[8], (int)gs.force[9], (int)gs.force[10], (int)gs.force[11],
+            (int)gs.forceCount, gs.forceMaxAbs);
         return json;
     };
 
@@ -252,13 +268,15 @@ void HttpServer::setupRoutes() {
         } else if (action == "read") {
             return gripper && gripper->isConnected()
                 ? "{\"success\":true}" : "{\"success\":false,\"error\":\"gripper not connected\"}";
+        } else if (action == "v4_single_report" || action == "v4_read_params" ||
+                   action == "v4_force_zero" || action == "v4_start_stream") {
+            bool ok = gripper && gripper->sendV4Action(action);
+            return ok ? "{\"success\":true}" : "{\"success\":false,\"error\":\"v4 gripper not connected\"}";
         } else if (action == "led") {
             int r = json::extractInt(body, "r");
             int g = json::extractInt(body, "g");
             int b = json::extractInt(body, "b");
             int brightness = json::extractInt(body, "brightness");
-            fprintf(stderr, "[LED控制] slot=%s action=led r=%d g=%d b=%d brightness=%d umiGrippers=%s\n",
-                    slot.c_str(), r, g, b, brightness, gripper ? "yes" : "no");
             if (r < 0 || g < 0 || b < 0 || brightness < 0) {
                 return "{\"success\":false,\"error\":\"missing led parameters\"}";
             }
@@ -268,8 +286,6 @@ void HttpServer::setupRoutes() {
                 return "{\"success\":true}";
             } else if (deviceManager_) {
                 auto* gs = deviceManager_->getGripperSlot(slot);
-                fprintf(stderr, "[LED控制] DeviceManager回退: gs=%p gripper=%p connected=%d\n",
-                        (void*)gs, gs ? (void*)gs->gripper.get() : nullptr, gs ? (int)gs->connected : 0);
                 if (gs && gs->gripper && gs->connected) {
                     gs->gripper->setLed(r, g, b, brightness);
                     return "{\"success\":true}";
@@ -375,9 +391,10 @@ void HttpServer::setupRoutes() {
             std::vector<std::string> slots = json::extractStringArray(body, "slots");
             std::vector<std::string> streams = json::extractStringArray(body, "streams");
             std::map<std::string, std::string> slotMapping = json::extractStringMap(body, "slotMapping");
+            std::map<std::string, std::string> gripperSlotMapping = json::extractStringMap(body, "gripperSlotMapping");
             std::string saveMode = json::extractStr(body, "saveMode");
             if (saveMode != "fast") saveMode = "strict";
-            startRecording(types, slots, streams, slotMapping, saveMode);
+            startRecording(types, slots, streams, slotMapping, gripperSlotMapping, saveMode);
         } else if (action == "stop") {
             try { stopRecording(); } catch (...) {}
         }
@@ -953,12 +970,8 @@ void HttpServer::setupMultiCameraRoutes() {
     svr_->Get("/api/devices", [this](const httplib::Request&, httplib::Response& res) {
         std::string json;
         if (deviceManager_) {
-            deviceManager_->refreshDetectedCameras();
-            deviceManager_->refreshDetectedGrippers();
-            // 普通设备查询只做轻量刷新，不在轮询里打开相机。
-            // 相机 open 会占用 SDK/USB 资源，和正在采集的读帧线程并发时容易导致卡顿、黑屏或进程退出。
-            // 新插入的相机由 /api/scan 这个明确的用户动作补挂，避免网页轮询反复触发重操作。
-            deviceManager_->attachDetectedGrippersToEmptySlots(false);
+            // 页面会高频轮询 /api/devices；这里只返回缓存，避免每次进入设备控制页都重新枚举硬件。
+            // 设备插拔由后台补挂线程和“重新扫描设备”按钮处理。
             json = deviceManager_->toJson();
         } else {
             json = "{\"devices\":[],\"slots\":{\"left\":{\"type\":\"none\",\"connected\":false},\"right\":{\"type\":\"none\",\"connected\":false},\"head\":{\"type\":\"none\",\"connected\":false}},\"grippers\":[],\"gripperSlots\":{\"left\":{\"type\":\"none\",\"connected\":false},\"right\":{\"type\":\"none\",\"connected\":false},\"extra\":{\"type\":\"none\",\"connected\":false}}}";
@@ -978,6 +991,48 @@ void HttpServer::setupMultiCameraRoutes() {
         } else {
             json::sendJson(res, "{\"error\":\"No DeviceManager\"}");
         }
+    });
+
+    // 交换左右手动夹爪槽位。用于两个夹爪固件标识相同、连接顺序和物理左右相反的场景。
+    svr_->Post("/api/grippers/swap-hands", [this](const httplib::Request&, httplib::Response& res) {
+        if (!deviceManager_) {
+            json::sendJson(res, "{\"success\":false,\"error\":\"No DeviceManager\"}");
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(recordingState_.mutex);
+            if (recordingState_.isRecording || recordingState_.finalizing) {
+                json::sendJson(res, "{\"success\":false,\"error\":\"录制或保存过程中不能交换夹爪\"}");
+                return;
+            }
+        }
+        if (!deviceManager_->swapManualGripperSlots()) {
+            json::sendJson(res, "{\"success\":false,\"error\":\"只能交换左右手动夹爪，电动夹爪暂不参与\"}");
+            return;
+        }
+
+        auto syncSlotPointer = [this](const std::string& slot) {
+            umiGrippers_[slot] = nullptr;
+            electricGrippers_[slot] = nullptr;
+            auto* gs = deviceManager_->getGripperSlot(slot);
+            if (!gs || !gs->connected || !gs->gripper) return;
+            if (gs->gripperType == "manual") {
+                umiGrippers_[slot] = dynamic_cast<UmiGripper*>(gs->gripper.get());
+            } else if (gs->gripperType == "electric") {
+                electricGrippers_[slot] = dynamic_cast<ElectricGripper*>(gs->gripper.get());
+            }
+        };
+        syncSlotPointer("left");
+        syncSlotPointer("right");
+
+        // 清空左右页面缓存，下一帧采集线程会按新槽位写入，避免交换后短时间显示旧数据。
+        for (const auto& slot : {std::string("left"), std::string("right")}) {
+            auto& gs = gripperWebStates_[slot];
+            std::lock_guard<std::mutex> lock(gs.mutex);
+            gs.hasData = false;
+            gs.timestamp = 0;
+        }
+        json::sendJson(res, "{\"success\":true}");
     });
 
     // 设备交换 API

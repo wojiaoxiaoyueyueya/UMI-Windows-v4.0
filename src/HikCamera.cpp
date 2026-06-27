@@ -193,11 +193,7 @@ cv::Mat HikCamera::read() {
         rawLen = rawFrame_->frameLen;
     }
 
-    if (pt != lastPixelType_) {
-        fprintf(stderr, "[HikCamera] SN=%s pixelType=0x%x size=%dx%d len=%zu\n",
-                serialNumber_.c_str(), pt, w, h, rawLen);
-        lastPixelType_ = pt;
-    }
+    if (pt != lastPixelType_) lastPixelType_ = pt;
 
     // SDK 像素转换 — 部分像素格式需要更大缓冲区
     unsigned int bgrBufSize = w * h * 4;

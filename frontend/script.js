@@ -6,7 +6,7 @@
 // 4. 数据录制（开始/停止/状态轮询）
 // 5. 数据转换（选择会话、批量转换、进度轮询）
 // 6. 设备信息查询
-// 7. UMI V2 夹爪控制（位置/按键/LED）
+// 7. UMI 2.0/V4.0 夹爪控制（位置/按键/IMU/力传感/LED）
 
 (function() {
     // ---- 侧边栏收缩/展开（localStorage 跨页面联动） ----
@@ -108,8 +108,8 @@
     // 显示位置(左手/右手/头部) → 后端实际槽位(left/right/head)
     var slotMap = { left: 'left', right: 'right', head: 'head' };
     var headCameraSerial = ''; // 用户选择的头部摄像头序列号，空=不分配
-    var handsSwapped = false; // 左右手是否已交换（持久状态，轮询不会覆盖）
-    var gripperSlotMap = { left: 'left', right: 'right' }; // 固定映射，不可交换
+    var cameraHandsSwapped = false; // 仅表示左右摄像头显示是否交换，和夹爪交换互不影响。
+    var gripperSlotMap = { left: 'left', right: 'right' }; // 手动夹爪使用后端真实槽位交换，前端保持固定映射。
 
     // 根据 headCameraSerial 和 deviceInfo 重建 slotMap
     // 核心约束：每个显示位置映射到不同的后端槽位
@@ -153,7 +153,7 @@
         }
 
         // 应用交换状态
-        if (handsSwapped) {
+        if (cameraHandsSwapped) {
             var tmp = slotMap.left;
             slotMap.left = slotMap.right;
             slotMap.right = tmp;
@@ -768,7 +768,7 @@
             + '<div class="guide-item"><span class="guide-dot" style="background:#38bdf8"></span><span class="guide-text"><strong>左手 / 右手摄像头</strong> — 开启彩色、深度、红外视频流</span></div>'
             + '<div class="guide-item"><span class="guide-dot" style="background:#c084fc"></span><span class="guide-text"><strong>头部摄像头</strong> — 在分配面板选择设备后开启视频流</span></div>'
             + '<div class="guide-item"><span class="guide-dot" style="background:#818cf8"></span><span class="guide-text"><strong>摄像头分配</strong> — 选择一个已连接设备作为头部摄像头</span></div>'
-            + '<div class="guide-item"><span class="guide-dot" style="background:#34d399"></span><span class="guide-text"><strong>交换左右手</strong> — 切换左右手摄像头的画面</span></div>'
+            + '<div class="guide-item"><span class="guide-dot" style="background:#34d399"></span><span class="guide-text"><strong>交换左右摄像头</strong> — 只切换摄像头画面映射，不影响手动夹爪</span></div>'
             + '<div class="guide-item"><span class="guide-dot" style="background:#fbbf24"></span><span class="guide-text"><strong>一键全开 / 全关</strong> — 快速开启或关闭所有已连接设备的视频流和传感器</span></div>'
             + '<div class="guide-item"><span class="guide-dot" style="background:#f87171"></span><span class="guide-text"><strong>传感器</strong> — 开启夹爪数据采集</span></div>'
             + '</div></div>';
@@ -995,12 +995,21 @@
         }
     }
 
+    var manualDisplayStablePct = {};
+    var manualDisplayStableRaw = {};
+
     function updateGripperDisplay(displayPos, data) {
         handleManualGripperButtons(displayPos, data);
         var prefix = displayPos === 'left' ? 'gripperLeft' : 'gripperRight';
-        // 闭合度：position 0=闭合 1=张开，显示为闭合百分比 (1-position)*100
+        // 后端 position 已经归一化为闭合比例，这里只做监控页的稳定显示。
         var pos = data.position !== undefined ? data.position : 0;
-        var closePct = Math.round(pos * 100);
+        var rawPct = clampPercent(Number(pos || 0) * 100);
+        var targetPct = Math.round(rawPct);
+        if (manualDisplayStablePct[displayPos] === undefined || Math.abs(targetPct - manualDisplayStablePct[displayPos]) >= 2) {
+            manualDisplayStablePct[displayPos] = targetPct;
+        }
+        controlDisplayRawPct[displayPos] = rawPct;
+        var closePct = applyGripDisplayCalibration(displayPos, manualDisplayStablePct[displayPos]);
         var posEl = document.getElementById(prefix + 'Position');
         if (posEl) posEl.textContent = closePct + '%';
         // 进度条
@@ -1021,9 +1030,91 @@
         if (connEl) connEl.style.background = data.connected ? '#22c55e' : '#ef4444';
         // 顶部副标题状态。
         var valuesEl = document.getElementById(prefix + 'Values');
-        if (valuesEl) valuesEl.textContent = closePct + '% | P:' + pos.toFixed(3) + ' B1:' + (data.button1 || 0) + ' B2:' + (data.button2 || 0);
+        if (valuesEl) valuesEl.textContent = closePct + '% | 原始:' + rawPct.toFixed(1) + '% B1:' + (data.button1 || 0) + ' B2:' + (data.button2 || 0);
         updateLastDataTime();
     }
+
+    function hexByte(value) {
+        var n = Number(value || 0);
+        return '0x' + n.toString(16).toUpperCase().padStart(2, '0');
+    }
+
+    function stableManualRaw(displayPos, data) {
+        if (!data.extended) return null;
+        var raw = Number(data.positionRaw || 0);
+        var threshold = data.positionFallback ? 120 : 32;
+        if (manualDisplayStableRaw[displayPos] === undefined || Math.abs(raw - manualDisplayStableRaw[displayPos]) >= threshold) {
+            manualDisplayStableRaw[displayPos] = raw;
+        }
+        return manualDisplayStableRaw[displayPos];
+    }
+
+    function updateManualTelemetry(prefix, displayPos, data) {
+        var protoEl = document.getElementById(prefix + 'Proto');
+        var payloadEl = document.getElementById(prefix + 'Payload');
+        var deviceEl = document.getElementById(prefix + 'DeviceId');
+        var rawEl = document.getElementById(prefix + 'Raw');
+        var imuEl = document.getElementById(prefix + 'Imu');
+        var forceEl = document.getElementById(prefix + 'Force');
+        if (protoEl) {
+            protoEl.textContent = Number(data.protocolVersion) === 4 ? 'UMI 2.0' : '未识别';
+        }
+        if (payloadEl) payloadEl.textContent = data.payloadLength ? hexByte(data.payloadLength) : '--';
+        if (deviceEl) deviceEl.textContent = data.extended ? hexByte(data.deviceId) : '--';
+        if (rawEl) {
+            var stableRaw = stableManualRaw(displayPos, data);
+            var rawText = stableRaw !== null ? String(stableRaw) : '--';
+            if (data.positionFallback) rawText += '*';
+            rawEl.textContent = rawText;
+            rawEl.title = data.positionFallback ? '本帧磁编码无效，闭合度保持上一帧稳定值' : '磁编码浮点值 x10000';
+        }
+        if (imuEl) {
+            var acc = Array.isArray(data.accel) ? data.accel : [];
+            var gyro = Array.isArray(data.gyro) ? data.gyro : [];
+            imuEl.textContent = data.extended ? ('A' + (acc[0] || 0) + '/' + (acc[1] || 0) + '/' + (acc[2] || 0)) : '--';
+            imuEl.title = data.extended ? ('加速度: ' + acc.join(', ') + '；角速度: ' + gyro.join(', ')) : '';
+        }
+        if (forceEl) forceEl.textContent = data.extended ? ((data.forceMaxAbs || 0) + ' / ' + (data.forceCount || 0)) : '--';
+        updateManualV4Panel(prefix, data);
+    }
+
+    function v4ArrayText(values) {
+        if (!Array.isArray(values) || values.length < 3) return '--';
+        return values[0] + ' / ' + values[1] + ' / ' + values[2];
+    }
+
+    function updateManualV4Panel(prefix, data) {
+        var panel = document.getElementById(prefix + 'V4Panel');
+        if (!panel) return;
+        var isV4 = !!(data && data.connected && Number(data.protocolVersion) === 4);
+        panel.style.display = isV4 ? '' : 'none';
+        if (!isV4) return;
+
+        var magneticEl = document.getElementById(prefix + 'Magnetic');
+        var accelEl = document.getElementById(prefix + 'Accel');
+        var gyroEl = document.getElementById(prefix + 'Gyro');
+        var ledEl = document.getElementById(prefix + 'LedState');
+        var txEl = document.getElementById(prefix + 'TxParam');
+        var rxEl = document.getElementById(prefix + 'RxParam');
+        var lastCmdEl = document.getElementById(prefix + 'LastCmd');
+        var fpsEl = document.getElementById(prefix + 'Fps');
+        var forceListEl = document.getElementById(prefix + 'ForceList');
+
+        if (magneticEl) magneticEl.textContent = data.positionRaw !== undefined ? (Number(data.positionRaw || 0) / 10000).toFixed(4) : '--';
+        if (accelEl) accelEl.textContent = v4ArrayText(data.accel);
+        if (gyroEl) gyroEl.textContent = v4ArrayText(data.gyro);
+        if (ledEl) ledEl.textContent = [data.ledR || 0, data.ledG || 0, data.ledB || 0].join('/') + ' @ ' + (data.ledBrightness || 0);
+        if (txEl) txEl.textContent = data.hasDeviceParams ? ('0x' + Number(data.txAddress || 0).toString(16).toUpperCase().padStart(4, '0') + ' / ' + (data.txFrequency || 0)) : '--';
+        if (rxEl) rxEl.textContent = data.hasDeviceParams ? ('0x' + Number(data.rxAddress || 0).toString(16).toUpperCase().padStart(4, '0') + ' / ' + (data.rxFrequency || 0)) : '--';
+        if (lastCmdEl) lastCmdEl.textContent = data.lastV4Command ? hexByte(data.lastV4Command) : '--';
+        if (fpsEl) fpsEl.textContent = data.captureFps !== undefined ? Number(data.captureFps || 0).toFixed(1) + ' Hz' : '--';
+        if (forceListEl) {
+            var force = Array.isArray(data.force) ? data.force.slice(0, data.forceCount || 0) : [];
+            forceListEl.textContent = force.length ? force.join(' / ') : '--';
+            forceListEl.title = force.length ? force.join(', ') : '';
+        }
+    }
+
     var gripperPollTimer = setInterval(function() {
         if (!serverOnline || currentPage !== 'monitor') return;
         ['left', 'right'].forEach(function(displayPos) {
@@ -1805,7 +1896,13 @@
         fetch('/api/record', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'start', streams: streams, slotMapping: slotMap, saveMode: recState.saveMode })
+            body: JSON.stringify({
+                action: 'start',
+                streams: streams,
+                slotMapping: slotMap,
+                gripperSlotMapping: gripperSlotMap,
+                saveMode: recState.saveMode
+            })
         }).then(function(r) { return r.json(); }).then(function(d) {
             recState.startingNew = false;
             if (d.recording) {
@@ -2520,15 +2617,177 @@
 
     // ---- Gripper Control Page ----
     var gripPollTimer = null;
+    var controlDisplayRawPct = { left: 0, right: 0 };
+    var gripDisplayCalibration = {
+        left: { openRaw: null, closeRaw: null },
+        right: { openRaw: null, closeRaw: null }
+    };
+
+    try {
+        var savedGripDisplayCalibration = localStorage.getItem('gripDisplayCalibration');
+        if (savedGripDisplayCalibration) {
+            var parsedGripDisplayCalibration = JSON.parse(savedGripDisplayCalibration);
+            ['left', 'right'].forEach(function(slot) {
+                var saved = parsedGripDisplayCalibration[slot];
+                if (saved && typeof saved === 'object') {
+                    gripDisplayCalibration[slot] = {
+                        openRaw: saved.openRaw === null || saved.openRaw === undefined ? null : Number(saved.openRaw),
+                        closeRaw: saved.closeRaw === null || saved.closeRaw === undefined ? null : Number(saved.closeRaw)
+                    };
+                }
+            });
+        }
+    } catch (e) {
+        gripDisplayCalibration = {
+            left: { openRaw: null, closeRaw: null },
+            right: { openRaw: null, closeRaw: null }
+        };
+    }
+
+    function saveGripDisplayCalibration() {
+        localStorage.setItem('gripDisplayCalibration', JSON.stringify(gripDisplayCalibration));
+    }
+
+    function clampPercent(value) {
+        return Math.max(0, Math.min(100, value));
+    }
+
+    function normalizeCalibrationValue(value) {
+        if (value === '' || value === null || value === undefined) return null;
+        var n = Number(value);
+        return Number.isFinite(n) ? Math.round(n * 10) / 10 : null;
+    }
+
+    function setGripDisplayCalibrationValue(slot, field, value) {
+        if (!gripDisplayCalibration[slot]) gripDisplayCalibration[slot] = { openRaw: null, closeRaw: null };
+        gripDisplayCalibration[slot][field] = normalizeCalibrationValue(value);
+        saveGripDisplayCalibration();
+        syncGripDisplayCalibrationInputs(slot);
+        var rawPct = controlDisplayRawPct[slot] || 0;
+        updateGripDisplayCalibrationHint(slot, rawPct, applyGripDisplayCalibration(slot, rawPct));
+    }
+
+    function formatCalibrationValue(value) {
+        return value === null || value === undefined ? '' : Number(value).toFixed(1).replace(/\.0$/, '');
+    }
+
+    function syncGripDisplayCalibrationInputs(slot) {
+        var prefix = slot === 'left' ? 'gripLeft' : 'gripRight';
+        var cal = gripDisplayCalibration[slot] || { openRaw: null, closeRaw: null };
+        var openInput = document.getElementById(prefix + 'CalOpen');
+        var closeInput = document.getElementById(prefix + 'CalClose');
+        if (openInput) openInput.value = formatCalibrationValue(cal.openRaw);
+        if (closeInput) closeInput.value = formatCalibrationValue(cal.closeRaw);
+    }
+
+    function applyGripDisplayCalibration(slot, rawPct) {
+        var cal = gripDisplayCalibration[slot] || {};
+        var openRaw = normalizeCalibrationValue(cal.openRaw);
+        var closeRaw = normalizeCalibrationValue(cal.closeRaw);
+        if (openRaw === null || closeRaw === null || Math.abs(closeRaw - openRaw) < 0.1) {
+            return clampPercent(Math.round(Number(rawPct || 0)));
+        }
+        return clampPercent(Math.round((Number(rawPct || 0) - openRaw) * 100 / (closeRaw - openRaw)));
+    }
+
+    function updateGripDisplayCalibrationHint(slot, rawPct, displayPct) {
+        var prefix = slot === 'left' ? 'gripLeft' : 'gripRight';
+        var hintEl = document.getElementById(prefix + 'DisplayCalHint');
+        if (hintEl) {
+            var cal = gripDisplayCalibration[slot] || {};
+            var openText = formatCalibrationValue(cal.openRaw) || '--';
+            var closeText = formatCalibrationValue(cal.closeRaw) || '--';
+            hintEl.textContent = '原始 ' + Number(rawPct || 0).toFixed(1) +
+                '%，显示 ' + displayPct + '%，最大=' + openText + '%，最小=' + closeText + '%';
+        }
+    }
+
+    function initGripDisplayCalibrationControls() {
+        ['left', 'right'].forEach(syncGripDisplayCalibrationInputs);
+
+        document.querySelectorAll('[data-display-cal-field]').forEach(function(input) {
+            input.addEventListener('change', function() {
+                setGripDisplayCalibrationValue(
+                    input.getAttribute('data-display-cal-slot'),
+                    input.getAttribute('data-display-cal-field'),
+                    input.value
+                );
+            });
+        });
+
+        document.querySelectorAll('[data-display-cal-fit]').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                var slot = btn.getAttribute('data-display-cal-slot');
+                var rawPct = Number(controlDisplayRawPct[slot] || 0);
+                var mode = btn.getAttribute('data-display-cal-fit');
+                if (mode === 'open') setGripDisplayCalibrationValue(slot, 'openRaw', rawPct);
+                if (mode === 'close') setGripDisplayCalibrationValue(slot, 'closeRaw', rawPct);
+                if (mode === 'reset') {
+                    gripDisplayCalibration[slot] = { openRaw: null, closeRaw: null };
+                    saveGripDisplayCalibration();
+                    syncGripDisplayCalibrationInputs(slot);
+                    updateGripDisplayCalibrationHint(slot, rawPct, applyGripDisplayCalibration(slot, rawPct));
+                }
+            });
+        });
+    }
+
+    function swapGripDisplayCalibration() {
+        var leftCal = gripDisplayCalibration.left || { openRaw: null, closeRaw: null };
+        gripDisplayCalibration.left = gripDisplayCalibration.right || { openRaw: null, closeRaw: null };
+        gripDisplayCalibration.right = leftCal;
+        saveGripDisplayCalibration();
+        ['left', 'right'].forEach(function(slot) {
+            syncGripDisplayCalibrationInputs(slot);
+            var rawPct = Number(controlDisplayRawPct[slot] || 0);
+            updateGripDisplayCalibrationHint(slot, rawPct, applyGripDisplayCalibration(slot, rawPct));
+        });
+    }
+
+    function swapManualGrippers() {
+        var btn = document.getElementById('swapGrippersBtn');
+        if (btn) btn.disabled = true;
+        fetch('/api/grippers/swap-hands', { method: 'POST' })
+            .then(function(r) { return r.json(); })
+            .then(function(resp) {
+                if (!resp || !resp.success) {
+                    showToast('交换左右手动夹爪失败: ' + ((resp && resp.error) || '未知错误'), 'error');
+                    return;
+                }
+                swapGripDisplayCalibration();
+                return fetchDeviceInfo().then(function() {
+                    fetchGripperStatus();
+                    if (typeof refreshTeleopSelectors === 'function') refreshTeleopSelectors(true);
+                    showToast('左右夹爪已交换', 'success');
+                });
+            })
+            .catch(function() {
+                showToast('交换左右手动夹爪失败，服务未连接', 'error');
+            })
+            .finally(function() {
+                if (btn) btn.disabled = false;
+            });
+    }
+
+    var swapGrippersBtn = document.getElementById('swapGrippersBtn');
+    if (swapGrippersBtn) {
+        swapGrippersBtn.addEventListener('click', function(e) {
+            addRipple(this, e);
+            swapManualGrippers();
+        });
+    }
 
     function updateControlGripperPanel(slot, data) {
         var prefix = slot === 'left' ? 'gripLeft' : 'gripRight';
-        var pos = data.position !== undefined ? data.position : 0;
-        var closePct = Math.round(pos * 100);
+        var pos = Number(data.position !== undefined ? data.position : 0);
+        var rawPct = clampPercent(pos * 100);
+        controlDisplayRawPct[slot] = rawPct;
+        var closePct = applyGripDisplayCalibration(slot, rawPct);
         var posEl = document.getElementById(prefix + 'PosBig');
         if (posEl) posEl.textContent = closePct + '%';
         var rawEl = document.getElementById(prefix + 'RawBig');
-        if (rawEl) rawEl.textContent = pos.toFixed(4);
+        if (rawEl) rawEl.textContent = rawPct.toFixed(1) + '% / ' + pos.toFixed(4);
+        updateGripDisplayCalibrationHint(slot, rawPct, closePct);
         var barEl = document.getElementById(prefix + 'BarBig');
         if (barEl) {
             barEl.style.width = closePct + '%';
@@ -2545,7 +2804,38 @@
             connEl.textContent = data.connected ? '已连接' : '未连接';
             connEl.style.color = data.connected ? 'var(--accent-green)' : 'var(--text-dim)';
         }
+        updateManualTelemetry(prefix, slot, data);
     }
+
+    function runControlV4Action(displayPos, action) {
+        var backendSlot = gripperSlotMap[displayPos] || displayPos;
+        var labelMap = {
+            v4_single_report: '单次状态查询',
+            v4_read_params: '读取设备参数',
+            v4_force_zero: '力传感置零',
+            v4_start_stream: '恢复连续上报'
+        };
+        fetch(API_ALT + '/api/gripper/' + backendSlot + '/control', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: action})
+        }).then(function(r) { return r.json(); }).then(function(resp) {
+            if (resp && resp.success) {
+                showToast((labelMap[action] || 'UMI 2.0 指令') + '已发送', 'success');
+            } else {
+                showToast((labelMap[action] || 'UMI 2.0 指令') + '失败: ' + ((resp && resp.error) || '未知错误'), 'error');
+            }
+        }).catch(function() {
+            showToast('UMI 2.0 指令发送失败，服务未连接', 'error');
+        });
+    }
+
+    document.querySelectorAll('[data-control-v4-action]').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            runControlV4Action(btn.getAttribute('data-control-v4-slot'), btn.getAttribute('data-control-v4-action'));
+        });
+    });
+    initGripDisplayCalibrationControls();
 
     // 更新侧边栏夹爪连接状态（用 gripperSlotMap 映射显示位置→后端槽位）
     function updateGripConnStatus() {
@@ -2571,6 +2861,20 @@
         });
     }
 
+    function displaySlotForBackendSlot(backendSlot) {
+        for (var displayPos in gripperSlotMap) {
+            if ((gripperSlotMap[displayPos] || displayPos) === backendSlot) return displayPos;
+        }
+        return backendSlot === 'right' ? 'right' : 'left';
+    }
+
+    function updateLedDisplayForBackendSlot(backendSlot, r, g, b, brightness) {
+        var displaySlot = displaySlotForBackendSlot(backendSlot);
+        var prefix = displaySlot === 'left' ? 'gripLeft' : 'gripRight';
+        var ledEl = document.getElementById(prefix + 'LedState');
+        if (ledEl) ledEl.textContent = [r || 0, g || 0, b || 0].join('/') + ' @ ' + (brightness || 0);
+    }
+
     // LED 发送（指定后端槽位）
     function sendGripperLed(backendSlot) {
         var r = document.getElementById('ledR').value || 0;
@@ -2584,6 +2888,8 @@
             body: JSON.stringify({ action: 'led', r: +r, g: +g, b: +b, brightness: +bv })
         }).then(function(r){return r.json();}).then(function(d) {
             if (d.success) {
+                updateLedDisplayForBackendSlot(backendSlot, +r, +g, +b, +bv);
+                fetchGripperStatus();
                 showToast((backendSlot === 'left' ? '左' : '右') + '夹爪 LED 设置成功', 'success');
             } else {
                 showToast('LED 设置失败: ' + (d.error || '未知错误'), 'error');
@@ -3746,28 +4052,25 @@
     // 交换左右摄像头按钮
     document.getElementById('swapCamerasBtn').addEventListener('click', function() {
         // 切换交换状态
-        handsSwapped = !handsSwapped;
-        // 关闭所有活跃流
+        cameraHandsSwapped = !cameraHandsSwapped;
+        // 只关闭摄像头相关流，手动夹爪监控由独立按钮交换，不跟随摄像头交换。
         Object.keys(state).forEach(function(k) {
-            if (state[k]) {
-                var bk = streamBackendKeys[k] || toBackendKey(k);
-                delete streamBackendKeys[k];
-                fetch('/api/control?stream=' + bk + '&action=off').catch(function(){});
-                state[k] = false;
-            }
+            if (!state[k] || k.indexOf('-gripper') >= 0) return;
+            var bk = streamBackendKeys[k] || toBackendKey(k);
+            delete streamBackendKeys[k];
+            fetch('/api/control?stream=' + bk + '&action=off').catch(function(){});
+            state[k] = false;
         });
         // 停止视频
         stopAllStreamImgs();
         videoGrid.className = 'video-grid guide-mode';
         videoGrid.innerHTML = emptyGuideHtml();
-        var _gs3 = document.getElementById('gripperSection');
-        if (_gs3) _gs3.style.display = 'none';
         // 重建映射和开关
         rebuildSlotMap();
         lastToggleHash = '';
         buildCameraToggles();
         updateActiveCount();
-        showToast(handsSwapped ? '已交换左右手摄像头' : '已恢复原始左右手', 'success');
+        showToast(cameraHandsSwapped ? '已交换左右摄像头' : '已恢复摄像头原始左右顺序', 'success');
     });
 
     // 一键全开/全关按钮

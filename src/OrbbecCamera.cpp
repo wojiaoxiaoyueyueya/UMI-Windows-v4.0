@@ -404,8 +404,6 @@ void OrbbecCamera::onFrameSetCallback(ob_frame* frameset) {
                         pcH = ob_point_cloud_frame_get_height(pcFrame, &err);
                         if (err) { ob_delete_error(err); pcH = 0; err = nullptr; }
                         pointCloudCb_(pts, pcW, pcH, 0);
-                        static int pcSuccessCount = 0;
-                        if (++pcSuccessCount <= 3) fprintf(stderr, "[Orbbec] PointCloud OK: %d points (scale=%.4f), %dx%d\n", pointCount, scale, pcW, pcH);
                     }
                 }
                 if (err) ob_delete_error(err);
@@ -493,8 +491,6 @@ void OrbbecCamera::onFrameSetCallback(ob_frame* frameset) {
                 hasIRLeft = !irLeftRawCopy.empty();
                 ob_delete_frame(irLeftFrame, &err);
             } else {
-                static int irlFailCount = 0;
-                if (++irlFailCount <= 3) fprintf(stderr, "[Orbbec] IR-Left frame missing: %s\n", err ? ob_error_get_message(err) : "null frame");
                 if (err) ob_delete_error(err);
             }
         }
@@ -509,8 +505,6 @@ void OrbbecCamera::onFrameSetCallback(ob_frame* frameset) {
                 hasIRRight = !irRightRawCopy.empty();
                 ob_delete_frame(irRightFrame, &err);
             } else {
-                static int irrFailCount = 0;
-                if (++irrFailCount <= 3) fprintf(stderr, "[Orbbec] IR-Right frame missing: %s\n", err ? ob_error_get_message(err) : "null frame");
                 if (err) ob_delete_error(err);
             }
         }

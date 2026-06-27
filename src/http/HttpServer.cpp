@@ -180,18 +180,42 @@ void HttpServer::updateColorFrame(const cv::Mat& mat) {
         std::chrono::steady_clock::now().time_since_epoch()).count();
     colorState_.hasData = true;
     colorState_.hasRawJpeg = false;
-    static int pushCount = 0;
-    if (++pushCount <= 3) fprintf(stderr, "[调试] updateColorFrame #%d, mat=%dx%d, ts=%llu\n", pushCount, mat.cols, mat.rows, (unsigned long long)colorState_.timestamp);
 }
 
-void HttpServer::updateGripperData(const std::string& slot, float position, uint8_t button1, uint8_t button2, uint64_t timestamp) {
+void HttpServer::updateGripperData(const std::string& slot, const GripperState& state) {
     auto& gs = gripperWebStates_[slot];
     std::lock_guard<std::mutex> lock(gs.mutex);
-    gs.position = position;
-    gs.button1 = button1;
-    gs.button2 = button2;
-    gs.timestamp = timestamp;
-    gs.hasData = true;
+    gs.position = state.position;
+    gs.button1 = state.button1;
+    gs.button2 = state.button2;
+    gs.timestamp = state.timestamp;
+    gs.hasData = state.hasData;
+    gs.hasExtendedData = state.hasExtendedData;
+    gs.protocolVersion = state.protocolVersion;
+    gs.payloadLength = state.payloadLength;
+    gs.deviceId = state.deviceId;
+    gs.encoderRaw = state.encoderRaw;
+    gs.positionRaw = state.positionRaw;
+    gs.positionFallback = state.positionFallback;
+    gs.lastV4Command = state.lastV4Command;
+    gs.hasDeviceParams = state.hasDeviceParams;
+    gs.txAddress = state.txAddress;
+    gs.txFrequency = state.txFrequency;
+    gs.rxAddress = state.rxAddress;
+    gs.rxFrequency = state.rxFrequency;
+    gs.ledR = state.ledR;
+    gs.ledG = state.ledG;
+    gs.ledB = state.ledB;
+    gs.ledBrightness = state.ledBrightness;
+    for (int i = 0; i < 3; ++i) {
+        gs.accel[i] = state.accel[i];
+        gs.gyro[i] = state.gyro[i];
+    }
+    for (int i = 0; i < 12; ++i) {
+        gs.force[i] = state.force[i];
+    }
+    gs.forceCount = state.forceCount;
+    gs.forceMaxAbs = state.forceMaxAbs;
     gs.captureCount++;
 }
 
@@ -329,8 +353,6 @@ void HttpServer::updateIRRightFrame(const std::string& slot, const cv::Mat& mat)
 }
 
 void HttpServer::updatePointCloudData(const std::string& slot, const std::vector<float>& points, int width, int height) {
-    static int pcUpdateCount = 0;
-    if (++pcUpdateCount <= 5) fprintf(stderr, "[HTTP] updatePointCloudData slot=%s points=%zu w=%d h=%d\n", slot.c_str(), points.size(), width, height);
     auto it = cameraStates_.find(slot);
     if (it == cameraStates_.end()) return;
     auto& states = it->second;
