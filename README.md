@@ -704,7 +704,7 @@ powershell -ExecutionPolicy Bypass -File .\packaging\package_windows.ps1
 生成结果：
 
 ```text
-dist/UMI-Data-Capture-Platform-4.1.0-Setup.exe
+dist/UMI-Data-Capture-Platform-4.1.1-Setup.exe
 ```
 
 安装包已经包含程序、运行 DLL、网页、离线手势模型、转换脚本、Python 3.11 及数据转换依赖。对方不需要安装 Git、MSYS2、CMake、OpenCV 或 Python，双击安装后使用桌面快捷方式即可启动。

@@ -11,7 +11,7 @@ launcher = fileSystem.BuildPath(appRoot, "StartUMI.cmd")
 logFile = fileSystem.BuildPath(appRoot, "startup.log")
 
 If Not fileSystem.FileExists(executable) Or Not fileSystem.FileExists(launcher) Then
-    MsgBox "Application files are incomplete. Please install version 4.1.0 or later again.", 16, "UMI Data Capture Platform"
+    MsgBox "Application files are incomplete. Please install version 4.1.1 or later again.", 16, "UMI Data Capture Platform"
     WScript.Quit 1
 End If
 
@@ -51,7 +51,9 @@ Function IsServerReady()
     request.SetTimeouts 500, 500, 500, 500
     request.Open "GET", AppUrl, False
     request.Send
-    IsServerReady = (Err.Number = 0 And request.Status >= 200 And request.Status < 500)
+    ' A 404 response may come from another program already occupying port 8080.
+    ' Only the packaged control page returning HTTP 200 means UMI is ready.
+    IsServerReady = (Err.Number = 0 And request.Status = 200)
     Err.Clear
     On Error GoTo 0
 End Function

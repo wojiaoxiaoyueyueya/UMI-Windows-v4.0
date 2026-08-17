@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "4.1.0"
+  #define AppVersion "4.1.1"
 #endif
 
 #define AppName "UMI 数据采集平台"
@@ -44,6 +44,7 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{sys}\wscript.exe"; Parameters: ""
 Name: "{autodesktop}\{#AppName}"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\StartUMI.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\build\{#AppExeName}"
 
 [Run]
+Filename: "{cmd}"; Parameters: "/C taskkill /IM {#AppExeName} /F >nul 2>&1"; StatusMsg: "正在关闭旧版后台服务..."; Flags: runhidden waituntilterminated
 Filename: "{sys}\pnputil.exe"; Parameters: "/add-driver ""{app}\drivers\hikvision_usb3\mvu3v.inf"" /install"; StatusMsg: "正在安装海康 USB3 Vision 驱动..."; Flags: runhidden waituntilterminated
 Filename: "{sys}\pnputil.exe"; Parameters: "/add-driver ""{app}\drivers\gcan_wdm\USBCANWDM.INF"" /install"; StatusMsg: "正在安装 GCAN USB-CAN 驱动..."; Flags: runhidden waituntilterminated
 Filename: "{sys}\pnputil.exe"; Parameters: "/add-driver ""{app}\drivers\gcan_canfd\USBCANFD.inf"" /install"; StatusMsg: "正在安装 GCAN CAN-FD 驱动..."; Flags: runhidden waituntilterminated
