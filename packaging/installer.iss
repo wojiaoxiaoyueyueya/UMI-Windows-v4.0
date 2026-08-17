@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "4.1.1"
+  #define AppVersion "4.1.2"
 #endif
 
 #define AppName "UMI 数据采集平台"
@@ -12,7 +12,8 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
-DefaultDirName={localappdata}\UMIDataCapturePlatform
+DefaultDirName=D:\UMIDataCapturePlatform
+UsePreviousAppDir=no
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=admin
@@ -36,8 +37,9 @@ VersionInfoProductName={#AppName}
 Source: "stage\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Dirs]
-Name: "{app}\data_capture"
-Name: "{app}\data_converted"
+Name: "{app}"; Permissions: users-modify
+Name: "{app}\data_capture"; Permissions: users-modify
+Name: "{app}\data_converted"; Permissions: users-modify
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\StartUMI.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\build\{#AppExeName}"
@@ -53,3 +55,26 @@ Filename: "{sys}\wscript.exe"; Parameters: """{app}\StartUMI.vbs"""; Description
 
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/C taskkill /IM {#AppExeName} /F >nul 2>&1"; Flags: runhidden; RunOnceId: "StopUMIDataCapturePlatform"
+
+[Code]
+function IsSystemDrivePath(const Path: String): Boolean;
+begin
+  Result := CompareText(ExtractFileDrive(Path), 'C:') = 0;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (CurPageID = wpSelectDir) and IsSystemDrivePath(WizardDirValue) then
+  begin
+    MsgBox('本项目不允许安装到 C 盘。请选择 D、E、F 等非系统盘。', mbError, MB_OK);
+    Result := False;
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  if IsSystemDrivePath(ExpandConstant('{app}')) then
+    Result := '本项目不允许安装到 C 盘。请返回并选择 D、E、F 等非系统盘。';
+end;

@@ -704,10 +704,10 @@ powershell -ExecutionPolicy Bypass -File .\packaging\package_windows.ps1
 生成结果：
 
 ```text
-dist/UMI-Data-Capture-Platform-4.1.1-Setup.exe
+dist/UMI-Data-Capture-Platform-4.1.2-Setup.exe
 ```
 
-安装包已经包含程序、运行 DLL、网页、离线手势模型、转换脚本、Python 3.11 及数据转换依赖。对方不需要安装 Git、MSYS2、CMake、OpenCV 或 Python，双击安装后使用桌面快捷方式即可启动。
+安装包已经包含程序、运行 DLL、网页、离线手势模型、转换脚本、Python 3.11 及数据转换依赖。默认安装到 `D:\UMIDataCapturePlatform`，安装器禁止选择 C 盘；没有 D 盘时可选择其他非 C 盘。对方不需要安装 Git、MSYS2、CMake、OpenCV 或 Python，双击安装后使用桌面快捷方式即可启动。
 
 首次启动会给 Windows 最多 5 分钟完成设备枚举和驱动初始化。后台输出保存在安装目录的 `startup.log`；若后台提前退出或始终未就绪，启动器会自动打开该日志，便于定位缺失驱动、运行库或设备握手问题。
 

@@ -1,6 +1,6 @@
 # Build a self-contained Windows x64 installer.
 param(
-    [string]$Version = "4.1.1",
+    [string]$Version = "4.1.2",
     [string]$BuildDir = "",
     [string]$MingwBin = "C:\msys64\mingw64\bin",
     [string]$PythonVersion = "3.11.9"

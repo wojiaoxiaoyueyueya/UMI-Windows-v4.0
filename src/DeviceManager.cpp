@@ -8,6 +8,7 @@
 #include "UmiGripper.hpp"
 #include "ElectricGripper.hpp"
 #include "ECanVciWrapper.hpp"
+#include "utils/WinFsUtils.hpp"
 
 #include <cstdio>
 #include <algorithm>
@@ -43,6 +44,16 @@ bool isLikelyEsp32CanBridgeVid(uint16_t vid) {
 
 bool isLikelyManualDataPortVid(uint16_t vid) {
     return vid == 0x1A86 || vid == 0x10C4 || vid == 0x0403 || vid == 0x067B;
+}
+
+std::string currentExecutableDirectory() {
+    wchar_t executablePath[MAX_PATH] = {};
+    DWORD length = GetModuleFileNameW(nullptr, executablePath, MAX_PATH);
+    if (length == 0) return ".";
+    std::wstring directory(executablePath, length);
+    size_t lastSlash = directory.find_last_of(L"\\/");
+    if (lastSlash != std::wstring::npos) directory.resize(lastSlash);
+    return winfs::wideToUtf8(directory);
 }
 }
 
@@ -512,13 +523,7 @@ bool DeviceManager::attachDetectedGrippersToEmptySlots(bool allowElectricScan) {
     bool canAvailable = false;
     auto& canWrapper = ECanVciWrapper::sharedInstance();
     if (!allowElectricScan) return changed;
-    char exePath[MAX_PATH] = {0};
-    std::string exeDir = ".";
-    if (GetModuleFileNameA(nullptr, exePath, MAX_PATH) > 0) {
-        exeDir = exePath;
-        auto lastSlash = exeDir.find_last_of("\\/");
-        if (lastSlash != std::string::npos) exeDir = exeDir.substr(0, lastSlash);
-    }
+    std::string exeDir = currentExecutableDirectory();
     if (canWrapper.load(exeDir) || canWrapper.load("")) {
         if (canWrapper.openDevice(4, 0) && canWrapper.initCAN(0, 0x00, 0x14) && canWrapper.startCAN()) {
             canAvailable = true;
@@ -1185,12 +1190,7 @@ void DeviceManager::detectAndAssignGrippers() {
     auto& canWrapper = ECanVciWrapper::sharedInstance();
 
     // 搜索 DLL 路径：exe目录下
-    std::string exeDir;
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    exeDir = exePath;
-    auto lastSlash = exeDir.find_last_of("\\/");
-    if (lastSlash != std::string::npos) exeDir = exeDir.substr(0, lastSlash);
+    std::string exeDir = currentExecutableDirectory();
 
     bool canAvailable = false;
     if (canWrapper.load(exeDir)) {

@@ -9,6 +9,7 @@
 #include <vector>
 #include <mutex>
 #include <cstdio>
+#include "utils/WinFsUtils.hpp"
 
 // ---- CAN SDK 结构体定义（来自 ECanVci.h） ----
 // 注意：不使用 pack(1)，与 SDK 原始头文件保持一致（默认对齐）
@@ -77,7 +78,7 @@ public:
         paths.push_back("ECanVci.dll");
 
         for (const auto& p : paths) {
-            hModule_ = LoadLibraryA(p.c_str());
+            hModule_ = LoadLibraryW(winfs::utf8ToWide(p).c_str());
             if (hModule_) {
                 fprintf(stderr, "[CAN] 已加载 DLL: %s\n", p.c_str());
                 break;

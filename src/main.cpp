@@ -12,6 +12,7 @@
 #include "HikCameraAdapter.hpp"
 #include "OrbbecCamera.hpp"
 #include "SlamManager.hpp"
+#include "utils/WinFsUtils.hpp"
 
 #include <thread>
 #include <chrono>
@@ -23,13 +24,13 @@
 #include <windows.h>
 
 static std::string getExecutableDir() {
-    char path[MAX_PATH];
-    DWORD len = GetModuleFileNameA(NULL, path, MAX_PATH);
+    wchar_t path[MAX_PATH] = {};
+    DWORD len = GetModuleFileNameW(NULL, path, MAX_PATH);
     if (len > 0) {
-        char* lastSlash = strrchr(path, '\\');
-        if (!lastSlash) lastSlash = strrchr(path, '/');
-        if (lastSlash) *lastSlash = '\0';
-        return std::string(path);
+        std::wstring executablePath(path, len);
+        size_t lastSlash = executablePath.find_last_of(L"\\/");
+        if (lastSlash != std::wstring::npos) executablePath.resize(lastSlash);
+        return winfs::wideToUtf8(executablePath);
     }
     return ".";
 }
@@ -56,7 +57,7 @@ static bool shouldPublishColorFrame(HttpServer& server, const std::string& slot,
 static std::string g_exeDir;
 static LONG WINAPI crashHandler(EXCEPTION_POINTERS* info) {
     std::string logPath = g_exeDir + "/crash.log";
-    FILE* f = fopen(logPath.c_str(), "a");
+    FILE* f = fopen(winfs::utf8ToAnsi(logPath).c_str(), "a");
     if (f) {
         SYSTEMTIME st;
         GetLocalTime(&st);
@@ -71,10 +72,12 @@ static LONG WINAPI crashHandler(EXCEPTION_POINTERS* info) {
                           (LPCSTR)info->ExceptionRecord->ExceptionAddress,
                           &hModule);
         if (hModule) {
-            char moduleName[MAX_PATH];
-            GetModuleFileNameA(hModule, moduleName, MAX_PATH);
+            wchar_t moduleName[MAX_PATH] = {};
+            DWORD moduleNameLength = GetModuleFileNameW(hModule, moduleName, MAX_PATH);
+            std::string moduleNameUtf8 = winfs::wideToUtf8(
+                std::wstring(moduleName, moduleNameLength));
             fprintf(f, "  Module: %s (base=0x%p, offset=0x%tx)\n",
-                    moduleName, hModule,
+                    moduleNameUtf8.c_str(), hModule,
                     (ptrdiff_t)info->ExceptionRecord->ExceptionAddress - (ptrdiff_t)hModule);
         } else {
             fprintf(f, "  Module: unknown\n");

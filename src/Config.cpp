@@ -1,6 +1,7 @@
 // Config.cpp - 配置文件读取实现
 
 #include "Config.hpp"
+#include "utils/WinFsUtils.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -15,7 +16,7 @@
 
 // 简易 JSON 解析（无第三方依赖）
 static std::string readWholeFile(const std::string& path) {
-    std::ifstream f(path);
+    std::ifstream f(winfs::utf8ToAnsi(path));
     if (!f.is_open()) return "";
     std::ostringstream ss;
     ss << f.rdbuf();

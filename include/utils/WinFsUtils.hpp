@@ -15,19 +15,23 @@ namespace winfs {
 
 inline std::wstring utf8ToWide(const std::string& s) {
     if (s.empty()) return L"";
-    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                  s.data(), static_cast<int>(s.size()), nullptr, 0);
     if (len <= 0) return L"";
-    std::wstring ws(len - 1, 0);
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], len);
+    std::wstring ws(static_cast<size_t>(len), L'\0');
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                        s.data(), static_cast<int>(s.size()), &ws[0], len);
     return ws;
 }
 
 inline std::string wideToUtf8(const std::wstring& ws) {
     if (ws.empty()) return "";
-    int len = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    int len = WideCharToMultiByte(CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()),
+                                  nullptr, 0, nullptr, nullptr);
     if (len <= 0) return "";
-    std::string s(len - 1, 0);
-    WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, &s[0], len, nullptr, nullptr);
+    std::string s(static_cast<size_t>(len), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()),
+                        &s[0], len, nullptr, nullptr);
     return s;
 }
 
@@ -35,10 +39,12 @@ inline std::string utf8ToAnsi(const std::string& utf8) {
     if (utf8.empty()) return "";
     std::wstring ws = utf8ToWide(utf8);
     if (ws.empty()) return utf8;
-    int len = WideCharToMultiByte(CP_ACP, 0, ws.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    int len = WideCharToMultiByte(CP_ACP, 0, ws.data(), static_cast<int>(ws.size()),
+                                  nullptr, 0, nullptr, nullptr);
     if (len <= 0) return utf8;
-    std::string result(len - 1, 0);
-    WideCharToMultiByte(CP_ACP, 0, ws.c_str(), -1, &result[0], len, nullptr, nullptr);
+    std::string result(static_cast<size_t>(len), '\0');
+    WideCharToMultiByte(CP_ACP, 0, ws.data(), static_cast<int>(ws.size()),
+                        &result[0], len, nullptr, nullptr);
     return result;
 }
 
