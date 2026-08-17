@@ -1,6 +1,6 @@
 # Build a self-contained Windows x64 installer.
 param(
-    [string]$Version = "4.0.0",
+    [string]$Version = "4.1.0",
     [string]$BuildDir = "",
     [string]$MingwBin = "C:\msys64\mingw64\bin",
     [string]$PythonVersion = "3.11.9"
@@ -37,7 +37,9 @@ function Test-SystemDll([string]$Name) {
         "COMDLG32", "COMCTL32", "CRYPT32", "bcrypt", "Secur32", "SHLWAPI", "SETUPAPI",
         "WINMM", "AVICAP32", "VERSION", "WINTRUST", "RPCRT4", "COMBASE", "IMM32",
         "DWMAPI", "UXTHEME", "OPENGL32", "DWRITE", "DNSAPI", "IPHLPAPI", "WINHTTP",
-        "WLDAP32", "USERENV", "AVRT", "PROPSYS", "SHCORE", "CFGMGR32", "POWRPROF"
+        "WLDAP32", "USERENV", "AVRT", "PROPSYS", "SHCORE", "CFGMGR32", "POWRPROF",
+        "WINSPOOL", "WSOCK32", "d3d11", "dxgi", "dbghelp", "MF", "MFReadWrite", "MFPlat",
+        "MSIMG32", "ncrypt", "gdiplus", "USP10", "PSAPI", "mscoree"
     )
     foreach ($prefix in $systemPrefixes) {
         if ($Name.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
@@ -55,7 +57,7 @@ function Copy-RuntimeFile([string]$Source, [System.Collections.Generic.Queue[str
 }
 
 function Find-Dependency([string]$Name) {
-    foreach ($directory in @($BuildDir, $MingwBin)) {
+    foreach ($directory in @($stageBuild, $BuildDir, $MingwBin)) {
         $candidate = Join-Path $directory $Name
         if ([System.IO.File]::Exists($candidate)) { return $candidate }
     }
@@ -73,7 +75,14 @@ function Copy-ApplicationRuntime {
     Copy-RuntimeFile $executable $queue
 
     # SDK libraries loaded through LoadLibrary must be seeded explicitly.
-    foreach ($relativeDir in @("lib\hikvision\lib\win64", "lib\orbbec\lib\win64", "lib\gcan")) {
+    # Only deploy DLLs here: MVS GenTL .cti producers are version-coupled to a
+    # full MVS installation and can conflict with the direct camera SDK.
+    foreach ($relativeDir in @(
+        "lib\hikvision\lib\win64",
+        "lib\hikvision\runtime\win64",
+        "lib\orbbec\lib\win64",
+        "lib\gcan"
+    )) {
         $sdkDir = Join-Path $projectRoot $relativeDir
         if ([System.IO.Directory]::Exists($sdkDir)) {
             Get-ChildItem -LiteralPath $sdkDir -File -Filter "*.dll" | ForEach-Object {
@@ -111,7 +120,22 @@ function Copy-ProjectAssets {
         Copy-Item -LiteralPath (Join-Path $projectRoot $file) -Destination (Join-Path $stageRoot $file)
     }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "StartUMI.vbs") -Destination $stageRoot
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "StartUMI.cmd") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "README-install.txt") -Destination $stageRoot
+    $driversRoot = Join-Path $stageRoot "drivers"
+    [System.IO.Directory]::CreateDirectory($driversRoot) | Out-Null
+    foreach ($driver in @(
+        @{ Source = "lib\hikvision\drivers\usb3"; Destination = "hikvision_usb3" },
+        @{ Source = "lib\gcan\drivers\wdm"; Destination = "gcan_wdm" },
+        @{ Source = "lib\gcan\drivers\canfd"; Destination = "gcan_canfd" },
+        @{ Source = "lib\serial\drivers\ch341"; Destination = "ch341" }
+    )) {
+        $source = Join-Path $projectRoot $driver.Source
+        if (-not [System.IO.Directory]::Exists($source)) {
+            throw "Required driver package is missing: $source"
+        }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $driversRoot $driver.Destination) -Recurse
+    }
     [System.IO.Directory]::CreateDirectory((Join-Path $stageRoot "data_capture")) | Out-Null
     [System.IO.Directory]::CreateDirectory((Join-Path $stageRoot "data_converted")) | Out-Null
 }
@@ -167,6 +191,26 @@ Copy-ApplicationRuntime
 Copy-ProjectAssets
 Install-EmbeddedPython
 [System.IO.Directory]::CreateDirectory($distRoot) | Out-Null
+
+$requiredStageFiles = @(
+    "build\ManualGripper.exe",
+    "build\MvCameraControl.dll",
+    "build\MvUsb3vTL.dll",
+    "build\ippi.dll",
+    "build\OrbbecSDK.dll",
+    "drivers\hikvision_usb3\mvu3v.inf",
+    "drivers\gcan_wdm\USBCANWDM.INF",
+    "drivers\gcan_canfd\USBCANFD.inf",
+    "drivers\ch341\CH341SER.INF",
+    "runtime\python\python.exe",
+    "tools\convert_to_rlds.py"
+)
+foreach ($relativePath in $requiredStageFiles) {
+    $requiredPath = Join-Path $stageRoot $relativePath
+    if (-not [System.IO.File]::Exists($requiredPath)) {
+        throw "Required package file is missing: $requiredPath"
+    }
+}
 
 $stageFiles = Get-ChildItem -LiteralPath $stageRoot -Recurse -File
 Write-Output ("Staging files: {0}, size: {1:N1} MiB" -f $stageFiles.Count, (($stageFiles | Measure-Object Length -Sum).Sum / 1MB))

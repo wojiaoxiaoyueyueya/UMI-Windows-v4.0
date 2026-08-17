@@ -704,12 +704,14 @@ powershell -ExecutionPolicy Bypass -File .\packaging\package_windows.ps1
 生成结果：
 
 ```text
-dist/UMI-Data-Capture-Platform-4.0.0-Setup.exe
+dist/UMI-Data-Capture-Platform-4.1.0-Setup.exe
 ```
 
 安装包已经包含程序、运行 DLL、网页、离线手势模型、转换脚本、Python 3.11 及数据转换依赖。对方不需要安装 Git、MSYS2、CMake、OpenCV 或 Python，双击安装后使用桌面快捷方式即可启动。
 
-安装包仍然要求 Windows 已安装实际使用设备的底层驱动，尤其是海康 USB3 Vision、Orbbec 和 GCAN 驱动。标准 USB CDC 串口设备能被 Windows 自动识别时无需另外安装串口驱动。
+首次启动会给 Windows 最多 5 分钟完成设备枚举和驱动初始化。后台输出保存在安装目录的 `startup.log`；若后台提前退出或始终未就绪，启动器会自动打开该日志，便于定位缺失驱动、运行库或设备握手问题。
+
+安装包内置海康 MVS x64 Runtime、Orbbec x64 Runtime、海康 USB3 Vision 驱动、GCAN USB-CAN/CAN-FD 驱动和 CH341 串口驱动。安装程序会请求一次管理员权限，并使用 Windows 驱动管理器自动注册签名驱动。标准 UMI USB CDC 设备继续使用 Windows 自带驱动，无需单独安装。
 
 ## 16. 重要提醒
 

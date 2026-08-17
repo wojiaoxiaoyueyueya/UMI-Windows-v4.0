@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "4.0.0"
+  #define AppVersion "4.1.0"
 #endif
 
 #define AppName "UMI 数据采集平台"
@@ -15,7 +15,8 @@ AppPublisher={#AppPublisher}
 DefaultDirName={localappdata}\UMIDataCapturePlatform
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
-PrivilegesRequired=lowest
+PrivilegesRequired=admin
+PrivilegesRequiredOverridesAllowed=commandline
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist
@@ -43,6 +44,10 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{sys}\wscript.exe"; Parameters: ""
 Name: "{autodesktop}\{#AppName}"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\StartUMI.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\build\{#AppExeName}"
 
 [Run]
+Filename: "{sys}\pnputil.exe"; Parameters: "/add-driver ""{app}\drivers\hikvision_usb3\mvu3v.inf"" /install"; StatusMsg: "正在安装海康 USB3 Vision 驱动..."; Flags: runhidden waituntilterminated
+Filename: "{sys}\pnputil.exe"; Parameters: "/add-driver ""{app}\drivers\gcan_wdm\USBCANWDM.INF"" /install"; StatusMsg: "正在安装 GCAN USB-CAN 驱动..."; Flags: runhidden waituntilterminated
+Filename: "{sys}\pnputil.exe"; Parameters: "/add-driver ""{app}\drivers\gcan_canfd\USBCANFD.inf"" /install"; StatusMsg: "正在安装 GCAN CAN-FD 驱动..."; Flags: runhidden waituntilterminated
+Filename: "{sys}\pnputil.exe"; Parameters: "/add-driver ""{app}\drivers\ch341\CH341SER.INF"" /install"; StatusMsg: "正在安装 CH341 串口驱动..."; Flags: runhidden waituntilterminated
 Filename: "{sys}\wscript.exe"; Parameters: """{app}\StartUMI.vbs"""; Description: "启动 {#AppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]

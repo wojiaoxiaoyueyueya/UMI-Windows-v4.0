@@ -169,7 +169,7 @@ powershell -ExecutionPolicy Bypass -File .\packaging\package_windows.ps1
 输出文件：
 
 ```text
-dist/UMI-Data-Capture-Platform-4.0.0-Setup.exe
+dist/UMI-Data-Capture-Platform-4.1.0-Setup.exe
 ```
 
 安装包包含 C++ 程序、运行 DLL、前端、离线手势模型、转换脚本，以及带 NumPy、PyArrow、h5py 的内置 Python。目标电脑不需要安装源码编译环境和 Python。
@@ -177,7 +177,7 @@ dist/UMI-Data-Capture-Platform-4.0.0-Setup.exe
 目标电脑操作流程：
 
 1. 安装实际硬件需要的海康、Orbbec、GCAN 或 USB 串口驱动。
-2. 双击 `UMI-Data-Capture-Platform-4.0.0-Setup.exe`。
+2. 双击 `UMI-Data-Capture-Platform-4.1.0-Setup.exe`，并允许一次管理员权限请求；安装器会自动注册随包提供的硬件驱动。
 3. 安装结束后双击桌面的“UMI 数据采集平台”。
 4. 程序会隐藏运行并打开浏览器；也可以访问 `http://localhost:8080`。
 

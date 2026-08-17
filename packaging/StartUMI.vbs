@@ -2,30 +2,43 @@ Option Explicit
 
 Const AppUrl = "http://localhost:8080/index_old.html"
 
-Dim shell, fileSystem, appRoot, executable, retry
+Dim shell, fileSystem, appRoot, executable, launcher, logFile, retry
 Set shell = CreateObject("WScript.Shell")
 Set fileSystem = CreateObject("Scripting.FileSystemObject")
 appRoot = fileSystem.GetParentFolderName(WScript.ScriptFullName)
 executable = fileSystem.BuildPath(appRoot, "build\ManualGripper.exe")
+launcher = fileSystem.BuildPath(appRoot, "StartUMI.cmd")
+logFile = fileSystem.BuildPath(appRoot, "startup.log")
 
-If Not fileSystem.FileExists(executable) Then
-    MsgBox "ManualGripper.exe was not found. Please reinstall the application.", 16, "UMI Data Capture Platform"
+If Not fileSystem.FileExists(executable) Or Not fileSystem.FileExists(launcher) Then
+    MsgBox "Application files are incomplete. Please install version 4.1.0 or later again.", 16, "UMI Data Capture Platform"
     WScript.Quit 1
 End If
 
 ' Reuse an existing backend when the desktop shortcut is clicked repeatedly.
 If Not IsServerReady() Then
-    shell.CurrentDirectory = fileSystem.BuildPath(appRoot, "build")
-    shell.Run Chr(34) & executable & Chr(34), 0, False
+    If Not IsBackendRunning() Then
+        shell.CurrentDirectory = appRoot
+        shell.Run Chr(34) & launcher & Chr(34), 0, False
+    End If
 
-    For retry = 1 To 120
-        WScript.Sleep 500
+    ' Device discovery can be slow on a new PC while Windows initializes drivers.
+    For retry = 1 To 300
+        WScript.Sleep 1000
         If IsServerReady() Then Exit For
+        If retry Mod 3 = 0 And Not IsBackendRunning() Then Exit For
     Next
 End If
 
 If Not IsServerReady() Then
-    MsgBox "The service did not start within 60 seconds. Check device connections and reinstall if needed.", 16, "UMI Data Capture Platform"
+    If fileSystem.FileExists(logFile) Then
+        shell.Run "notepad.exe " & Chr(34) & logFile & Chr(34), 1, False
+    End If
+    If IsBackendRunning() Then
+        MsgBox "The backend is still detecting devices. startup.log has been opened. Wait for detection to finish, then click the desktop shortcut again.", 48, "UMI Data Capture Platform"
+    Else
+        MsgBox "The backend stopped before the web page became ready. startup.log has been opened. Check the last error and install the required hardware driver.", 16, "UMI Data Capture Platform"
+    End If
     WScript.Quit 2
 End If
 
@@ -39,6 +52,16 @@ Function IsServerReady()
     request.Open "GET", AppUrl, False
     request.Send
     IsServerReady = (Err.Number = 0 And request.Status >= 200 And request.Status < 500)
+    Err.Clear
+    On Error GoTo 0
+End Function
+
+Function IsBackendRunning()
+    On Error Resume Next
+    Dim processList
+    Set processList = GetObject("winmgmts:\\.\root\cimv2").ExecQuery( _
+        "SELECT ProcessId FROM Win32_Process WHERE Name='ManualGripper.exe'")
+    IsBackendRunning = (Err.Number = 0 And processList.Count > 0)
     Err.Clear
     On Error GoTo 0
 End Function
