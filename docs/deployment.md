@@ -152,17 +152,33 @@ http://localhost:8080/index_old.html
 http://localhost:8080/info.html
 ```
 
-## 7. 运行版压缩包
+## 7. 生成可直接安装的软件
 
-如果对方不会编译，可以在已编译电脑上制作运行版压缩包，包含：
+首次在打包电脑安装 Inno Setup：
 
-```text
-build/
-frontend/
-config.json
-tools/
-README.md
-requirements.txt
+```powershell
+winget install --id JRSoftware.InnoSetup -e
 ```
 
-运行版仍要求新电脑安装硬件驱动。采集数据和转换数据是否打包，按实际需要决定。
+完成项目编译后，在项目根目录执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\packaging\package_windows.ps1
+```
+
+输出文件：
+
+```text
+dist/UMI-Data-Capture-Platform-4.0.0-Setup.exe
+```
+
+安装包包含 C++ 程序、运行 DLL、前端、离线手势模型、转换脚本，以及带 NumPy、PyArrow、h5py 的内置 Python。目标电脑不需要安装源码编译环境和 Python。
+
+目标电脑操作流程：
+
+1. 安装实际硬件需要的海康、Orbbec、GCAN 或 USB 串口驱动。
+2. 双击 `UMI-Data-Capture-Platform-4.0.0-Setup.exe`。
+3. 安装结束后双击桌面的“UMI 数据采集平台”。
+4. 程序会隐藏运行并打开浏览器；也可以访问 `http://localhost:8080`。
+
+硬件底层驱动不能由普通应用 DLL 替代。标准 USB CDC 设备已经被 Windows 自动识别为 COM 口时，可以跳过对应串口驱动。

@@ -1,0 +1,180 @@
+# Build a self-contained Windows x64 installer.
+param(
+    [string]$Version = "4.0.0",
+    [string]$BuildDir = "",
+    [string]$MingwBin = "C:\msys64\mingw64\bin",
+    [string]$PythonVersion = "3.11.9"
+)
+
+$ErrorActionPreference = "Stop"
+
+$projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+if ([string]::IsNullOrWhiteSpace($BuildDir)) {
+    $BuildDir = Join-Path $projectRoot "build"
+}
+$BuildDir = [System.IO.Path]::GetFullPath($BuildDir)
+$stageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "stage"))
+$cacheRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "cache"))
+$distRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot "dist"))
+$stageBuild = Join-Path $stageRoot "build"
+
+function Reset-StageDirectory {
+    $packagingRoot = [System.IO.Path]::GetFullPath($PSScriptRoot).TrimEnd('\') + '\'
+    if (-not $stageRoot.StartsWith($packagingRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+        [System.IO.Path]::GetFileName($stageRoot) -ne "stage") {
+        throw "Unsafe staging path: $stageRoot"
+    }
+    if ([System.IO.Directory]::Exists($stageRoot)) {
+        [System.IO.Directory]::Delete($stageRoot, $true)
+    }
+    [System.IO.Directory]::CreateDirectory($stageBuild) | Out-Null
+}
+
+function Test-SystemDll([string]$Name) {
+    $systemPrefixes = @(
+        "api-ms-", "ext-ms-", "KERNEL32", "KERNELBASE", "ntdll", "msvcrt", "ucrtbase",
+        "WS2_32", "USER32", "GDI32", "ADVAPI32", "SHELL32", "OLE32", "OLEAUT32",
+        "COMDLG32", "COMCTL32", "CRYPT32", "bcrypt", "Secur32", "SHLWAPI", "SETUPAPI",
+        "WINMM", "AVICAP32", "VERSION", "WINTRUST", "RPCRT4", "COMBASE", "IMM32",
+        "DWMAPI", "UXTHEME", "OPENGL32", "DWRITE", "DNSAPI", "IPHLPAPI", "WINHTTP",
+        "WLDAP32", "USERENV", "AVRT", "PROPSYS", "SHCORE", "CFGMGR32", "POWRPROF"
+    )
+    foreach ($prefix in $systemPrefixes) {
+        if ($Name.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+function Copy-RuntimeFile([string]$Source, [System.Collections.Generic.Queue[string]]$Queue) {
+    if (-not [System.IO.File]::Exists($Source)) { return }
+    $destination = Join-Path $stageBuild ([System.IO.Path]::GetFileName($Source))
+    if (-not [System.IO.File]::Exists($destination)) {
+        Copy-Item -LiteralPath $Source -Destination $destination
+    }
+    $Queue.Enqueue($destination)
+}
+
+function Find-Dependency([string]$Name) {
+    foreach ($directory in @($BuildDir, $MingwBin)) {
+        $candidate = Join-Path $directory $Name
+        if ([System.IO.File]::Exists($candidate)) { return $candidate }
+    }
+    return $null
+}
+
+function Copy-ApplicationRuntime {
+    $executable = Join-Path $BuildDir "ManualGripper.exe"
+    $objdump = Join-Path $MingwBin "objdump.exe"
+    if (-not [System.IO.File]::Exists($executable)) { throw "Missing executable: $executable" }
+    if (-not [System.IO.File]::Exists($objdump)) { throw "Missing objdump: $objdump" }
+
+    $queue = [System.Collections.Generic.Queue[string]]::new()
+    $checked = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    Copy-RuntimeFile $executable $queue
+
+    # SDK libraries loaded through LoadLibrary must be seeded explicitly.
+    foreach ($relativeDir in @("lib\hikvision\lib\win64", "lib\orbbec\lib\win64", "lib\gcan")) {
+        $sdkDir = Join-Path $projectRoot $relativeDir
+        if ([System.IO.Directory]::Exists($sdkDir)) {
+            Get-ChildItem -LiteralPath $sdkDir -File -Filter "*.dll" | ForEach-Object {
+                Copy-RuntimeFile $_.FullName $queue
+            }
+        }
+    }
+
+    while ($queue.Count -gt 0) {
+        $current = $queue.Dequeue()
+        $currentName = [System.IO.Path]::GetFileName($current)
+        if (-not $checked.Add($currentName)) { continue }
+
+        $output = & $objdump -p $current 2>$null
+        foreach ($line in $output) {
+            if ($line -notmatch "DLL Name:\s+(\S+)") { continue }
+            $dependencyName = $Matches[1]
+            if (Test-SystemDll $dependencyName) { continue }
+            if ($checked.Contains($dependencyName)) { continue }
+            $dependency = Find-Dependency $dependencyName
+            if ($null -eq $dependency) {
+                Write-Warning "Runtime dependency was not found: $dependencyName (required by $currentName)"
+                continue
+            }
+            Copy-RuntimeFile $dependency $queue
+        }
+    }
+}
+
+function Copy-ProjectAssets {
+    foreach ($directory in @("frontend", "tools", "docs")) {
+        Copy-Item -LiteralPath (Join-Path $projectRoot $directory) -Destination (Join-Path $stageRoot $directory) -Recurse
+    }
+    foreach ($file in @("config.json", "requirements.txt", "README.md")) {
+        Copy-Item -LiteralPath (Join-Path $projectRoot $file) -Destination (Join-Path $stageRoot $file)
+    }
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "StartUMI.vbs") -Destination $stageRoot
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "README-install.txt") -Destination $stageRoot
+    [System.IO.Directory]::CreateDirectory((Join-Path $stageRoot "data_capture")) | Out-Null
+    [System.IO.Directory]::CreateDirectory((Join-Path $stageRoot "data_converted")) | Out-Null
+}
+
+function Install-EmbeddedPython {
+    [System.IO.Directory]::CreateDirectory($cacheRoot) | Out-Null
+    $archiveName = "python-$PythonVersion-embed-amd64.zip"
+    $archivePath = Join-Path $cacheRoot $archiveName
+    $downloadUrl = "https://www.python.org/ftp/python/$PythonVersion/$archiveName"
+    if (-not [System.IO.File]::Exists($archivePath)) {
+        Write-Output "Downloading embedded Python $PythonVersion..."
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $archivePath
+    }
+
+    $pythonRoot = Join-Path $stageRoot "runtime\python"
+    [System.IO.Directory]::CreateDirectory($pythonRoot) | Out-Null
+    Expand-Archive -LiteralPath $archivePath -DestinationPath $pythonRoot -Force
+
+    $sitePackages = Join-Path $pythonRoot "Lib\site-packages"
+    [System.IO.Directory]::CreateDirectory($sitePackages) | Out-Null
+    $pthFile = Get-ChildItem -LiteralPath $pythonRoot -File -Filter "python*._pth" | Select-Object -First 1
+    if ($null -eq $pthFile) { throw "Embedded Python path file was not found" }
+    @(
+        "python311.zip",
+        ".",
+        "Lib\site-packages",
+        "import site"
+    ) | Set-Content -LiteralPath $pthFile.FullName -Encoding Ascii
+
+    & python -m pip install --disable-pip-version-check --no-compile --upgrade `
+        --target $sitePackages -r (Join-Path $projectRoot "requirements.txt")
+    if ($LASTEXITCODE -ne 0) { throw "Failed to install embedded Python dependencies" }
+
+    & (Join-Path $pythonRoot "python.exe") -c "import numpy, pyarrow, h5py; print('Embedded Python dependencies OK')"
+    if ($LASTEXITCODE -ne 0) { throw "Embedded Python validation failed" }
+}
+
+function Find-InnoCompiler {
+    $command = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    foreach ($candidate in @(
+        "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+        "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe",
+        "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+    )) {
+        if ([System.IO.File]::Exists($candidate)) { return $candidate }
+    }
+    throw "Inno Setup 6 was not found. Install: winget install --id JRSoftware.InnoSetup -e"
+}
+
+Reset-StageDirectory
+Copy-ApplicationRuntime
+Copy-ProjectAssets
+Install-EmbeddedPython
+[System.IO.Directory]::CreateDirectory($distRoot) | Out-Null
+
+$stageFiles = Get-ChildItem -LiteralPath $stageRoot -Recurse -File
+Write-Output ("Staging files: {0}, size: {1:N1} MiB" -f $stageFiles.Count, (($stageFiles | Measure-Object Length -Sum).Sum / 1MB))
+
+$iscc = Find-InnoCompiler
+& $iscc "/DAppVersion=$Version" (Join-Path $PSScriptRoot "installer.iss")
+if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed" }
+
+$installer = Join-Path $distRoot "UMI-Data-Capture-Platform-$Version-Setup.exe"
+if (-not [System.IO.File]::Exists($installer)) { throw "Installer was not generated: $installer" }
+Write-Output ("Installer ready: {0} ({1:N1} MiB)" -f $installer, ((Get-Item -LiteralPath $installer).Length / 1MB))

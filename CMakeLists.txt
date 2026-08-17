@@ -23,7 +23,16 @@ else()
 endif()
 
 set(OpenCV_DIR "${MSYS2_ROOT}/lib/cmake/opencv4")
-find_package(OpenCV REQUIRED)
+# 只链接当前工程实际使用的模块，避免运行包携带完整 OpenCV 组件集。
+find_package(OpenCV REQUIRED COMPONENTS
+    core
+    imgproc
+    imgcodecs
+    videoio
+    calib3d
+    features2d
+    video
+)
 
 # ---- Eigen3（SLAM 模块需要） ----
 find_package(Eigen3 QUIET)

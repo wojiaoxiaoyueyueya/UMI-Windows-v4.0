@@ -2,6 +2,8 @@
 build/
 out/
 dist/
+packaging/stage/
+packaging/cache/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake

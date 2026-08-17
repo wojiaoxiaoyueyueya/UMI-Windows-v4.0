@@ -10,10 +10,79 @@
 #include <iomanip>
 #include <sstream>
 #include <thread>
+#include <vector>
 #include <windows.h>
 
 #include "utils/WinFsUtils.hpp"
 #include "utils/JsonHelper.hpp"
+
+namespace {
+
+// 按 Windows 命令行规则转义单个参数，避免目录、任务名包含空格或中文时被错误拆分。
+std::wstring quoteProcessArgument(const std::string& value) {
+    const std::wstring input = winfs::utf8ToWide(value);
+    std::wstring result = L"\"";
+    size_t backslashCount = 0;
+
+    for (wchar_t ch : input) {
+        if (ch == L'\\') {
+            ++backslashCount;
+            continue;
+        }
+        if (ch == L'\"') {
+            result.append(backslashCount * 2 + 1, L'\\');
+            result.push_back(L'\"');
+        } else {
+            result.append(backslashCount, L'\\');
+            result.push_back(ch);
+        }
+        backslashCount = 0;
+    }
+
+    result.append(backslashCount * 2, L'\\');
+    result.push_back(L'\"');
+    return result;
+}
+
+// 直接创建子进程，绕过 cmd.exe 对多层引号的重新解释。
+int runProcess(const std::string& executable, const std::vector<std::string>& arguments) {
+    std::wstring commandLine = quoteProcessArgument(executable);
+    for (const auto& argument : arguments) {
+        commandLine.push_back(L' ');
+        commandLine += quoteProcessArgument(argument);
+    }
+
+    STARTUPINFOW startupInfo{};
+    startupInfo.cb = sizeof(startupInfo);
+    PROCESS_INFORMATION processInfo{};
+    std::vector<wchar_t> writableCommand(commandLine.begin(), commandLine.end());
+    writableCommand.push_back(L'\0');
+
+    if (!CreateProcessW(
+            nullptr,
+            writableCommand.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            CREATE_NO_WINDOW,
+            nullptr,
+            nullptr,
+            &startupInfo,
+            &processInfo)) {
+        std::cerr << "[转换] 无法启动转换程序，Windows错误=" << GetLastError()
+                  << ", 程序=" << executable << std::endl;
+        return 1;
+    }
+
+    WaitForSingleObject(processInfo.hProcess, INFINITE);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(processInfo.hProcess, &exitCode);
+    CloseHandle(processInfo.hThread);
+    CloseHandle(processInfo.hProcess);
+    return static_cast<int>(exitCode);
+}
+
+} // namespace
 
 static uint64_t toSessionTimeUs(uint64_t timestampUs, uint64_t sessionStartUs) {
     return timestampUs >= sessionStartUs ? timestampUs - sessionStartUs : 0;
@@ -972,12 +1041,20 @@ bool HttpServer::startConversion(const std::string& sourceDir,
             std::string outPath = outDir + "/" + sessions[i] + "_" + format;
             std::string progressPath = outDir + "/.convert_progress.json";
 
-            // Windows: 使用 system() 调用 Python
-            std::string cmd = "python \"" + script + "\" \"" + srcPath + "\" \"" + outPath + "\"";
-            if (!task.empty()) cmd += " --task \"" + task + "\"";
-            cmd += " --progress \"" + progressPath + "\"";
+            // 安装版优先使用项目内置 Python；源码运行时回退到系统 Python。
+            std::string bundledPython = winfs::resolvePath(frontendDir_ + "/../runtime/python/python.exe");
+            const std::string pythonExecutable = winfs::fileExists(bundledPython)
+                ? bundledPython
+                : "python";
+            std::vector<std::string> arguments = {script, srcPath, outPath};
+            if (!task.empty()) {
+                arguments.push_back("--task");
+                arguments.push_back(task);
+            }
+            arguments.push_back("--progress");
+            arguments.push_back(progressPath);
 
-            int ret = system(cmd.c_str());
+            int ret = runProcess(pythonExecutable, arguments);
 
             if (ret == 2) {
                 std::lock_guard<std::mutex> lk(convertState_.mutex);

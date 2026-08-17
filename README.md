@@ -206,7 +206,6 @@ python -m pip install -r requirements.txt
 numpy
 pyarrow
 h5py
-crcmod
 ```
 
 ### 6.4 安装硬件驱动
@@ -693,20 +692,24 @@ python -m pip install -r requirements.txt
 
 对方拉取后按本 README 编译运行。
 
-### 运行版压缩包方式
+### Windows 安装包方式（推荐）
 
 适合不会编译的人：
 
-```text
-build/
-frontend/
-config.json
-tools/
-requirements.txt
-README.md
+```powershell
+winget install --id JRSoftware.InnoSetup -e
+powershell -ExecutionPolicy Bypass -File .\packaging\package_windows.ps1
 ```
 
-运行版仍然要求对方安装相机、串口、CAN 等硬件驱动。
+生成结果：
+
+```text
+dist/UMI-Data-Capture-Platform-4.0.0-Setup.exe
+```
+
+安装包已经包含程序、运行 DLL、网页、离线手势模型、转换脚本、Python 3.11 及数据转换依赖。对方不需要安装 Git、MSYS2、CMake、OpenCV 或 Python，双击安装后使用桌面快捷方式即可启动。
+
+安装包仍然要求 Windows 已安装实际使用设备的底层驱动，尤其是海康 USB3 Vision、Orbbec 和 GCAN 驱动。标准 USB CDC 串口设备能被 Windows 自动识别时无需另外安装串口驱动。
 
 ## 16. 重要提醒
 
