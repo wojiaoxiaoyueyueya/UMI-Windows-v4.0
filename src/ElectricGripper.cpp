@@ -510,11 +510,14 @@ bool ElectricGripper::queryCurrent() {
 // ---- 参数配置 (模式 0x06) ----
 
 bool ElectricGripper::setAcceleration(float accelRadS2) {
+    if (!std::isfinite(accelRadS2)) return false;
+    // 协议使用 uint16 且缩放系数为 100，因此最大可编码值为 655.35 rad/s²。
+    accelRadS2 = std::max(0.0f, std::min(655.35f, accelRadS2));
     uint8_t data[4] = {};
     uint8_t returnType = 1;
     data[0] = (0x06 << 5) | (0x00 << 2) | returnType;
     data[1] = 0x01; // config_code = acceleration
-    uint16_t accelCode = (uint16_t)(accelRadS2 * 100.0f);
+    uint16_t accelCode = static_cast<uint16_t>(std::lround(accelRadS2 * 100.0f));
     data[2] = (accelCode >> 8) & 0xFF;
     data[3] = accelCode & 0xFF;
     return sendCANFrame(motorId_, data, 4);

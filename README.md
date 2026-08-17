@@ -10,6 +10,12 @@
 http://localhost:8080
 ```
 
+## 开发者文档入口
+
+- [`docs/developer-guide.md`](docs/developer-guide.md)：开发环境、编译调试、架构、API、设备扩展、回归测试和 Git 提交流程。
+- [`docs/code-structure.md`](docs/code-structure.md)：源码目录和核心模块职责。
+- [`docs/deployment.md`](docs/deployment.md)：新电脑部署、迁移和运行版打包。
+
 ## 1. 项目能做什么
 
 本项目主要用于采集机器人模仿学习、强化学习或数据分析所需的数据。
@@ -209,15 +215,21 @@ crcmod
 
 #### 海康工业相机
 
-1. 安装海康 MVS 客户端和驱动。
-2. 打开 MVS 客户端，确认相机能看到画面。
-3. 项目中需要以下文件存在：
+仓库中的头文件、`.lib` 和 `.dll` 只负责程序编译与运行，不能替代 Windows 的 USB3 Vision 设备驱动。新电脑必须另外安装海康 MVS。
+
+1. 安装海康 MVS 客户端，安装组件中勾选 USB 3.0 驱动。
+2. 打开 MVS 目录中的 `Driver Installation Tool`，确认 USB3 Vision 驱动已经安装。
+3. 在设备管理器中确认相机位于 `USB3 Vision Cameras`，没有黄色感叹号。
+4. 打开 MVS 客户端，确认能枚举并打开相机；随后关闭 MVS，避免它独占设备。
+5. 项目中需要以下文件存在：
 
 ```text
 lib/hikvision/include
 lib/hikvision/lib/win64/MvCameraControl.lib
 lib/hikvision/lib/win64/MvCameraControl.dll
 ```
+
+程序启动时会输出 `[海康诊断]`。`SDK 已加载但未枚举到相机` 通常表示系统驱动、USB 连接或设备占用问题；`编译时未找到海康 SDK` 才表示工程依赖不完整。
 
 #### Orbbec Gemini 305
 

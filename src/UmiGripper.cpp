@@ -135,7 +135,15 @@ bool isValidV4Frame(const uint8_t* frame, size_t frameLen) {
 
     const uint16_t expectedCrc = crc16Modbus(frame + 2, 2 + payloadLen);
     const uint16_t frameCrc = ((uint16_t)frame[4 + payloadLen] << 8) | frame[5 + payloadLen];
-    return expectedCrc == frameCrc;
+    if (expectedCrc != frameCrc) {
+        static int crcFailCount = 0;
+        if (++crcFailCount <= 5) {
+            fprintf(stderr, "[UMI夹爪] V4 CRC校验失败#%d: expected=0x%04X got=0x%04X frameLen=%zu cmd=0x%02X payloadLen=%d\n",
+                    crcFailCount, expectedCrc, frameCrc, frameLen, frame[2], (int)payloadLen);
+        }
+        return false;
+    }
+    return true;
 }
 
 bool findV4FrameInBuffer(const uint8_t* data, DWORD len, std::vector<uint8_t>& outFrame) {
@@ -411,18 +419,47 @@ bool UmiGripper::parseV4Frame(const uint8_t* frame, size_t frameLen) {
     if (command != kV4CommandStartReport && command != kV4CommandSingleReport) return false;
     if (payloadLen < 7) return false;
 
-    const uint8_t deviceId = payload[0];
-    const uint8_t button1 = payload[1];
-    const uint8_t button2 = payload[2];
-    const uint32_t encoder = readU32LE(payload + 3);
-    const float encoderPosition = readFloat32LE(payload + 3);
+    // V4.0 帧格式自适应：根据 payloadLen 判断是否含 deviceId 字节
+    // payloadLen == 18 → 无 deviceId（老固件）：[btn2][enc4][imu12]
+    // payloadLen >= 19 → 含 deviceId（新固件）：[devId][btn2][enc4][imu/force...]
+    const bool hasDeviceId = (payloadLen >= 19);
+    const int btnOffset = hasDeviceId ? 1 : 0;
+    const int encOffset = hasDeviceId ? 3 : 2;
+    const int imuOffset = hasDeviceId ? 7 : 6;
+    const bool isSingleReport = (command == kV4CommandSingleReport);
+
+    // V4 帧原始数据 dump（仅前 3 帧），用于验证 payload 布局
+    {
+        static int frameDumpCount = 0;
+        if (frameDumpCount < 3) {
+            fprintf(stderr, "[UMI夹爪 %s] V4帧原始数据#%d cmd=0x%02X len=%d deviceId=%s:",
+                    portName_.c_str(), frameDumpCount + 1, command, payloadLen,
+                    hasDeviceId ? "yes" : "no");
+            for (size_t j = 0; j < frameLen && j < 40; ++j)
+                fprintf(stderr, " %02X", frame[j]);
+            fprintf(stderr, "\n");
+            frameDumpCount++;
+        }
+    }
+
+    const uint8_t deviceId = hasDeviceId ? payload[0] : 0;
+    const uint8_t button1 = payload[btnOffset];
+    const uint8_t button2 = payload[btnOffset + 1];
+
+    // V4.0 按键原始字节诊断日志，用于排查新硬件按键值变体
+    static uint8_t lastLoggedBtn1 = 0xFF, lastLoggedBtn2 = 0xFF;
+    if (button1 != lastLoggedBtn1 || button2 != lastLoggedBtn2) {
+        fprintf(stderr, "[UMI夹爪 %s] V4按键原始值: btn1=0x%02X(%d) btn2=0x%02X(%d) payloadLen=%d cmd=0x%02X\n",
+                portName_.c_str(), button1, button1, button2, button2, payloadLen, command);
+        lastLoggedBtn1 = button1;
+        lastLoggedBtn2 = button2;
+    }
+
+    const uint32_t encoder = readU32LE(payload + encOffset);
+    const float encoderPosition = readFloat32LE(payload + encOffset);
     bool validEncoderPosition = std::isfinite(encoderPosition)
         && encoderPosition >= -0.05f
         && encoderPosition <= 1.05f;
-
-    // V4.0 实时上报帧的磁编码字段固定在数据段第 3~6 字节。
-    // 厂家回包示例中的 80 26 AB 3B 按小端 float 解析约为 0.0052，
-    // 因此这里按 0~1 的浮点闭合位置处理；第 7 字节之后是 IMU 数据，不能作为闭合度备用值。
 
     uint32_t displayPositionRaw = 0;
     float position = 0.0f;
@@ -432,18 +469,23 @@ bool UmiGripper::parseV4Frame(const uint8_t* frame, size_t frameLen) {
     int16_t forceValues[12] = {};
     uint8_t forceCount = 0;
     int forceMaxAbs = 0;
-    if (payloadLen >= 19) {
-        // 厂家 LSM6DS3 示例中 Gyroscope_ReadData() 的 12 字节顺序为：
-        // gyro_x/y/z 在前 6 字节，accel_x/y/z 在后 6 字节；每个 int16 按高字节在前输出。
-        for (int i = 0; i < 3; ++i) gyro[i] = readI16BE(payload + 7 + i * 2);
-        for (int i = 0; i < 3; ++i) accel[i] = readI16BE(payload + 13 + i * 2);
-    }
-    if (payloadLen >= 31) {
-        for (size_t i = 7; i + 1 < 31; i += 2) {
-            int16_t rawForce = readI16BE(payload + i);
-            if (forceCount < 12) forceValues[forceCount++] = rawForce;
-            int v = std::abs((int)rawForce);
-            if (v > forceMaxAbs) forceMaxAbs = v;
+
+    if (isSingleReport) {
+        // 0x03 单次上报：力传感(24B) + LED(4B)，从 imuOffset 开始
+        const size_t forceEnd = imuOffset + 24;
+        if ((size_t)payloadLen >= forceEnd) {
+            for (size_t i = imuOffset; i + 1 < forceEnd && i + 1 < (size_t)payloadLen; i += 2) {
+                int16_t rawForce = readI16BE(payload + i);
+                if (forceCount < 12) forceValues[forceCount++] = rawForce;
+                int v = std::abs((int)rawForce);
+                if (v > forceMaxAbs) forceMaxAbs = v;
+            }
+        }
+    } else {
+        // 0x01 连续上报：IMU 数据(gyro6B+accel6B=12B)，从 imuOffset 开始
+        if ((size_t)payloadLen >= imuOffset + 12) {
+            for (int i = 0; i < 3; ++i) gyro[i] = readI16BE(payload + imuOffset + i * 2);
+            for (int i = 0; i < 3; ++i) accel[i] = readI16BE(payload + imuOffset + 6 + i * 2);
         }
     }
 
@@ -477,8 +519,10 @@ bool UmiGripper::parseV4Frame(const uint8_t* frame, size_t frameLen) {
     }
 
     state_.position = smoothedPosition_;
-    state_.button1 = button1;
-    state_.button2 = button2;
+    // V4.0 协议按键归一化：0x00=松开，非零=按下 → 标准化为 0/1
+    // 向后兼容旧固件可能使用的不同键值约定（bit-mapped、active-low 等）
+    state_.button1 = (button1 != 0) ? 1 : 0;
+    state_.button2 = (button2 != 0) ? 1 : 0;
     state_.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     state_.hasData = true;
@@ -551,6 +595,8 @@ bool UmiGripper::tryStartV4WithFallbackBauds() {
             if (findV4FrameInBuffer(rawBuf, totalRead, frame) && parseV4Frame(frame.data(), frame.size())) {
                 protocol_ = ProtocolVersion::V4;
                 setLed(10, 10, 10, 64);
+                // 部分固件处理 LED 指令后会暂停连续上报，再次启动数据流以保持稳定连接。
+                sendV4Frame(kV4CommandStartReport, nullptr, 0);
                 fprintf(stderr, "[UMI夹爪] V4.0 协议握手成功: %s, baud=%d, side=%s\n",
                         portName_.c_str(), baud, handSide_.c_str());
                 return true;
@@ -570,6 +616,7 @@ bool UmiGripper::tryStartV4WithFallbackBauds() {
                 if (findV4FrameInBuffer(rawBuf, totalRead, frame) && parseV4Frame(frame.data(), frame.size())) {
                     protocol_ = ProtocolVersion::V4;
                     setLed(10, 10, 10, 64);
+                    sendV4Frame(kV4CommandStartReport, nullptr, 0);
                     fprintf(stderr, "[UMI澶圭埅] V4.0 鍗忚鎻℃墜鎴愬姛: %s, baud=%d, side=%s\n",
                             portName_.c_str(), baud, handSide_.c_str());
                     return true;
@@ -917,6 +964,8 @@ bool UmiGripper::configurePort(int baudRate) {
 
 void UmiGripper::pollLoop() {
     int failCount = 0;
+    auto lastValidFrameTime = std::chrono::steady_clock::now();
+    auto lastStreamRestartTime = lastValidFrameTime;
     while (running_) {
         if (hSerial_ == INVALID_HANDLE_VALUE) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -925,13 +974,28 @@ void UmiGripper::pollLoop() {
 
         uint8_t chunk[64] = {};
         DWORD bytesRead = 0;
-        if (!ReadFile(hSerial_, chunk, sizeof(chunk), &bytesRead, NULL) || bytesRead == 0) {
+        if (!ReadFile(hSerial_, chunk, sizeof(chunk), &bytesRead, NULL)) {
             failCount++;
-            if (failCount >= kMaxFailCount * 40) {
-                fprintf(stderr, "[UMI夹爪] V4 连续通信失败，标记为断开\n");
+            if (failCount >= kMaxFailCount) {
+                fprintf(stderr, "[UMI夹爪] 串口连续读取失败，标记为断开 (%s)\n", portName_.c_str());
                 connected_ = false;
                 state_.connected = false;
                 return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+        }
+
+        failCount = 0;
+        if (bytesRead == 0) {
+            // 读取超时只代表当前没有新数据。静默超过一秒时低频补发连续上报命令，
+            // 兼容在 LED 或查询指令后暂停数据流的 V4 固件。
+            auto now = std::chrono::steady_clock::now();
+            if (protocol_ == ProtocolVersion::V4
+                && now - lastValidFrameTime >= std::chrono::seconds(1)
+                && now - lastStreamRestartTime >= std::chrono::seconds(1)) {
+                sendV4Frame(kV4CommandStartReport, nullptr, 0);
+                lastStreamRestartTime = now;
             }
             continue;
         }
@@ -947,7 +1011,7 @@ void UmiGripper::pollLoop() {
                     std::chrono::system_clock::now().time_since_epoch()).count();
                 state_.hasData = true;
                 state_.connected = true;
-                failCount = 0;
+                lastValidFrameTime = std::chrono::steady_clock::now();
             }
             continue;
         }
@@ -960,7 +1024,7 @@ void UmiGripper::pollLoop() {
         std::vector<uint8_t> frame;
         while (popV4FrameFromBuffer(v4RxBuffer_, frame)) {
             if (parseV4Frame(frame.data(), frame.size())) {
-                failCount = 0;
+                lastValidFrameTime = std::chrono::steady_clock::now();
             }
         }
     }
@@ -971,7 +1035,6 @@ void UmiGripper::pollLoop() {
 bool UmiGripper::sendCommand(const uint8_t* data, size_t len) {
     if (hSerial_ == INVALID_HANDLE_VALUE || data == nullptr) return false;
     std::lock_guard<std::mutex> lock(serialMutex_);
-    PurgeComm(hSerial_, PURGE_RXCLEAR);
     DWORD written = 0;
     if (!WriteFile(hSerial_, data, (DWORD)len, &written, NULL)) return false;
     FlushFileBuffers(hSerial_);

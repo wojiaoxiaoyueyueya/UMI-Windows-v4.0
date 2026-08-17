@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <chrono>
+#include <utility>
 #include <windows.h>
 
 #include <libobsensor/ObSensor.h>
@@ -114,6 +115,26 @@ void OrbbecCamera::close() {
 
 bool OrbbecCamera::isOpened() const { return opened_; }
 
+void OrbbecCamera::setPointCloudEnabledProvider(std::function<bool()> provider) {
+    pointCloudEnabledProvider_ = std::move(provider);
+}
+
+bool OrbbecCamera::setRequestedStreams(bool depthEnabled, bool irEnabled) {
+    // Gemini 系列要求深度与红外使用相同分辨率和帧率；红外开启时深度必须一并启用。
+    depthEnabled = depthEnabled || irEnabled;
+    std::lock_guard<std::mutex> lock(streamReconfigureMutex_);
+    if (requestedDepth_ == depthEnabled && requestedIR_ == irEnabled) return true;
+
+    requestedDepth_ = depthEnabled;
+    requestedIR_ = irEnabled;
+    if (!streaming_) return true;
+
+    fprintf(stderr, "[Orbbec] 按页面开关重配硬件流: color=1 depth=%d ir=%d\n",
+            requestedDepth_ ? 1 : 0, requestedIR_ ? 1 : 0);
+    stopStreaming();
+    return startStreaming();
+}
+
 // ---- 能力检测 ----
 
 void OrbbecCamera::initCapabilities() {
@@ -163,129 +184,75 @@ bool OrbbecCamera::startStreaming() {
 
     ob_error* err = nullptr;
 
-    // 等齐所有帧类型才输出，确保 IR_LEFT/IR_RIGHT 帧在 frameset 中
-    ob_config_set_frame_aggregate_output_mode(config_, OB_FRAME_AGGREGATE_OUTPUT_ALL_TYPE_FRAME_REQUIRE, &err);
+    // Config 会在流切换后重复使用，每次重建启用列表，避免上一次的深度/红外配置残留。
+    ob_config_disable_all_stream(config_, &err);
     if (err) { ob_delete_error(err); err = nullptr; }
 
+    // 使用 SDK 默认推荐的宽松聚合模式：哪一路有帧就先回调哪一路。
+    // 深度、双红外和彩色同时打开时，如果强制等待所有帧齐全，容易造成缓冲堆积。
+    ob_config_set_frame_aggregate_output_mode(config_, OB_FRAME_AGGREGATE_OUTPUT_ANY_SITUATION, &err);
+    if (err) { ob_delete_error(err); err = nullptr; }
+
+    // Gemini 305 在 Windows Media Foundation 下使用 SDK 默认 profile 时，部分机器会卡在
+    // UVC 扩展单元配置并反复报告 setXu failed。固定请求已验证稳定的 640x480 profile，
+    // 但 fps=0、format=UNKNOWN，帧率和像素格式仍由 SDK/设备自动选择，不人为限帧。
+    auto enablePreferredVideoProfile = [this](ob_sensor_type sensorType, const char* label) -> bool {
+        ob_error* profileErr = nullptr;
+        ob_stream_profile_list* profiles = ob_pipeline_get_stream_profile_list(pipeline_, sensorType, &profileErr);
+        if (profileErr || !profiles) {
+            fprintf(stderr, "[Orbbec] 获取 %s profile 失败: %s\n", label,
+                    profileErr ? ob_error_get_message(profileErr) : "empty profile list");
+            if (profileErr) ob_delete_error(profileErr);
+            return false;
+        }
+
+        ob_stream_profile* profile = ob_stream_profile_list_get_video_stream_profile(
+            profiles, 640, 480, OB_FORMAT_UNKNOWN, 0, &profileErr);
+        if (profileErr || !profile) {
+            if (profileErr) { ob_delete_error(profileErr); profileErr = nullptr; }
+            profile = ob_stream_profile_list_get_profile(profiles, 0, &profileErr);
+        }
+
+        bool enabled = false;
+        if (!profileErr && profile) {
+            ob_config_enable_stream_with_stream_profile(config_, profile, &profileErr);
+            enabled = (profileErr == nullptr);
+        }
+
+        if (enabled) {
+            int width = ob_video_stream_profile_get_width(profile, &profileErr);
+            if (profileErr) { ob_delete_error(profileErr); profileErr = nullptr; width = 0; }
+            int height = ob_video_stream_profile_get_height(profile, &profileErr);
+            if (profileErr) { ob_delete_error(profileErr); profileErr = nullptr; height = 0; }
+            fprintf(stderr, "[Orbbec] %s: %dx%d, fps=SDK auto\n", label, width, height);
+        } else {
+            fprintf(stderr, "[Orbbec] 启用 %s profile 失败: %s\n", label,
+                    profileErr ? ob_error_get_message(profileErr) : "profile unavailable");
+        }
+
+        if (profileErr) { ob_delete_error(profileErr); profileErr = nullptr; }
+        ob_delete_stream_profile_list(profiles, &profileErr);
+        if (profileErr) ob_delete_error(profileErr);
+        return enabled;
+    };
+
     if (hasColor_) {
-        auto* profiles = ob_pipeline_get_stream_profile_list(pipeline_, OB_SENSOR_COLOR, &err);
-        if (!err && profiles) {
-            // 优先选择 640x480 降低缓冲区大小，避免 Alloc frame buffer failed
-            auto* profile = ob_stream_profile_list_get_video_stream_profile(
-                profiles, 640, 480, OB_FORMAT_UNKNOWN, 0, &err);
-            if (err || !profile) {
-                if (err) { ob_delete_error(err); err = nullptr; }
-                profile = ob_stream_profile_list_get_profile(profiles, 0, &err);
-            }
-            if (!err && profile) {
-                ob_config_enable_stream_with_stream_profile(config_, profile, &err);
-                int w = ob_video_stream_profile_get_width(profile, &err);
-                if (err) { ob_delete_error(err); err = nullptr; }
-                int h = ob_video_stream_profile_get_height(profile, &err);
-                if (err) { ob_delete_error(err); err = nullptr; }
-                auto fmt = ob_stream_profile_get_format(profile, &err);
-                if (err) { ob_delete_error(err); err = nullptr; }
-                fprintf(stderr, "[Orbbec] Color: %dx%d fmt=%d\n", w, h, (int)fmt);
-            }
-            ob_delete_stream_profile_list(profiles, &err);
-        }
-        if (err) ob_delete_error(err);
+        enablePreferredVideoProfile(OB_SENSOR_COLOR, "Color");
     }
 
-    if (hasDepth_) {
-        err = nullptr;
-        auto* profiles = ob_pipeline_get_stream_profile_list(pipeline_, OB_SENSOR_DEPTH, &err);
-        if (!err && profiles) {
-            auto* profile = ob_stream_profile_list_get_video_stream_profile(
-                profiles, 640, 480, OB_FORMAT_UNKNOWN, 0, &err);
-            if (err || !profile) {
-                if (err) { ob_delete_error(err); err = nullptr; }
-                profile = ob_stream_profile_list_get_profile(profiles, 0, &err);
-            }
-            if (!err && profile) {
-                ob_config_enable_stream_with_stream_profile(config_, profile, &err);
-                int w = ob_video_stream_profile_get_width(profile, &err);
-                if (err) { ob_delete_error(err); err = nullptr; }
-                int h = ob_video_stream_profile_get_height(profile, &err);
-                if (err) { ob_delete_error(err); err = nullptr; }
-                fprintf(stderr, "[Orbbec] Depth: %dx%d\n", w, h);
-            }
-            ob_delete_stream_profile_list(profiles, &err);
-        }
-        if (err) ob_delete_error(err);
+    if (hasDepth_ && requestedDepth_) {
+        enablePreferredVideoProfile(OB_SENSOR_DEPTH, "Depth");
     }
 
-    if (hasIR_) {
-        err = nullptr;
-        // 尝试分别启用左红外和右红外（双目相机）
-        bool stereoIR = false;
-        auto* profilesL = ob_pipeline_get_stream_profile_list(pipeline_, OB_SENSOR_IR_LEFT, &err);
-        if (!err && profilesL && ob_stream_profile_list_count(profilesL, &err) > 0) {
-            auto* profile = ob_stream_profile_list_get_video_stream_profile(
-                profilesL, 640, 480, OB_FORMAT_UNKNOWN, 0, &err);
-            if (err || !profile) {
-                if (err) { ob_delete_error(err); err = nullptr; }
-                profile = ob_stream_profile_list_get_profile(profilesL, 0, &err);
-            }
-            if (!err && profile) {
-                ob_config_enable_stream_with_stream_profile(config_, profile, &err);
-                fprintf(stderr, "[Orbbec] IR-Left enabled\n");
-                stereoIR = true;
-            }
-            ob_delete_stream_profile_list(profilesL, &err);
-        }
-        if (err) ob_delete_error(err);
-
-        err = nullptr;
-        auto* profilesR = ob_pipeline_get_stream_profile_list(pipeline_, OB_SENSOR_IR_RIGHT, &err);
-        if (!err && profilesR && ob_stream_profile_list_count(profilesR, &err) > 0) {
-            auto* profile = ob_stream_profile_list_get_video_stream_profile(
-                profilesR, 640, 480, OB_FORMAT_UNKNOWN, 0, &err);
-            if (err || !profile) {
-                if (err) { ob_delete_error(err); err = nullptr; }
-                profile = ob_stream_profile_list_get_profile(profilesR, 0, &err);
-            }
-            if (!err && profile) {
-                ob_config_enable_stream_with_stream_profile(config_, profile, &err);
-                fprintf(stderr, "[Orbbec] IR-Right enabled\n");
-            }
-            ob_delete_stream_profile_list(profilesR, &err);
-        }
-        if (err) ob_delete_error(err);
-
-        // 如果没有独立的左右红外传感器，回退到通用 IR
-        if (!stereoIR) {
-            err = nullptr;
-            auto* profiles = ob_pipeline_get_stream_profile_list(pipeline_, OB_SENSOR_IR, &err);
-            if (!err && profiles) {
-                auto* profile = ob_stream_profile_list_get_video_stream_profile(
-                    profiles, 640, 480, OB_FORMAT_UNKNOWN, 0, &err);
-                if (err || !profile) {
-                    if (err) { ob_delete_error(err); err = nullptr; }
-                    profile = ob_stream_profile_list_get_profile(profiles, 0, &err);
-                }
-                if (!err && profile) {
-                    ob_config_enable_stream_with_stream_profile(config_, profile, &err);
-                    int w = ob_video_stream_profile_get_width(profile, &err);
-                    if (err) { ob_delete_error(err); err = nullptr; }
-                    int h = ob_video_stream_profile_get_height(profile, &err);
-                    if (err) { ob_delete_error(err); err = nullptr; }
-                    fprintf(stderr, "[Orbbec] IR (mono): %dx%d\n", w, h);
-                }
-                ob_delete_stream_profile_list(profiles, &err);
-            }
-            if (err) ob_delete_error(err);
+    if (hasIR_ && requestedIR_) {
+        bool leftEnabled = enablePreferredVideoProfile(OB_SENSOR_IR_LEFT, "IR-Left");
+        bool rightEnabled = enablePreferredVideoProfile(OB_SENSOR_IR_RIGHT, "IR-Right");
+        if (!leftEnabled && !rightEnabled) {
+            enablePreferredVideoProfile(OB_SENSOR_IR, "IR");
         }
     }
 
-    ob_pipeline_start_with_callback(pipeline_, config_, frameSetCallback, this, &err);
-    if (err) {
-        fprintf(stderr, "[Orbbec] 启动 Pipeline 失败: %s\n", ob_error_get_message(err));
-        ob_delete_error(err);
-        return false;
-    }
-
-    // 创建点云 filter
+    // 创建点云 filter。必须在 Pipeline 回调启动前准备好，避免首批回调与 filter 创建交叉。
     err = nullptr;
     pointCloudFilter_ = ob_create_filter("PointCloudFilter", &err);
     if (err || !pointCloudFilter_) {
@@ -314,6 +281,25 @@ bool OrbbecCamera::startStreaming() {
     }
 
     streaming_ = true;
+    err = nullptr;
+    ob_pipeline_start_with_callback(pipeline_, config_, frameSetCallback, this, &err);
+    if (err) {
+        streaming_ = false;
+        fprintf(stderr, "[Orbbec] 启动 Pipeline 失败: %s\n", ob_error_get_message(err));
+        ob_delete_error(err);
+        err = nullptr;
+        if (pointCloudFilter_) {
+            ob_delete_filter(pointCloudFilter_, &err);
+            if (err) { ob_delete_error(err); err = nullptr; }
+            pointCloudFilter_ = nullptr;
+        }
+        if (alignFilter_) {
+            ob_delete_filter(alignFilter_, &err);
+            if (err) { ob_delete_error(err); err = nullptr; }
+            alignFilter_ = nullptr;
+        }
+        return false;
+    }
     fprintf(stderr, "[Orbbec] Pipeline 已启动\n");
 
     return true;
@@ -323,6 +309,12 @@ void OrbbecCamera::stopStreaming() {
     if (!streaming_ || !pipeline_) return;
 
     ob_error* err = nullptr;
+    streaming_ = false;
+
+    // 先停 Pipeline，等 SDK 回调退出后再释放 filter，避免回调线程使用已经释放的对象。
+    ob_pipeline_stop(pipeline_, &err);
+    if (err) { fprintf(stderr, "[Orbbec] 停止 Pipeline 失败: %s\n", ob_error_get_message(err)); ob_delete_error(err); err = nullptr; }
+
     if (pointCloudFilter_) {
         ob_delete_filter(pointCloudFilter_, &err);
         if (err) { ob_delete_error(err); err = nullptr; }
@@ -333,10 +325,6 @@ void OrbbecCamera::stopStreaming() {
         if (err) { ob_delete_error(err); err = nullptr; }
         alignFilter_ = nullptr;
     }
-
-    ob_pipeline_stop(pipeline_, &err);
-    if (err) { fprintf(stderr, "[Orbbec] 停止 Pipeline 失败: %s\n", ob_error_get_message(err)); ob_delete_error(err); }
-    streaming_ = false;
     fprintf(stderr, "[Orbbec] Pipeline 已停止\n");
 }
 
@@ -356,10 +344,35 @@ void OrbbecCamera::frameSetCallback(ob_frame* frameset, void* userdata) {
 
 void OrbbecCamera::onFrameSetCallback(ob_frame* frameset) {
     if (!frameset) return;
+    if (!streaming_) {
+        ob_delete_frame(frameset, nullptr);
+        return;
+    }
     ob_error* err = nullptr;
 
-    // Phase 0: 在提取任何子帧之前生成点云（frameset 必须完整）
+    bool shouldBuildPointCloud = false;
     if (pointCloudCb_ && pointCloudFilter_ && alignFilter_) {
+        bool requested = true;
+        if (pointCloudEnabledProvider_) {
+            try {
+                requested = pointCloudEnabledProvider_();
+            } catch (...) {
+                requested = false;
+            }
+        }
+        if (requested) {
+            auto now = std::chrono::steady_clock::now();
+            // 点云数据量大，预览 5Hz 已经足够交互，避免每帧分配大块内存。
+            if (lastPointCloudTime_.time_since_epoch().count() == 0 ||
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPointCloudTime_).count() >= 200) {
+                lastPointCloudTime_ = now;
+                shouldBuildPointCloud = true;
+            }
+        }
+    }
+
+    // Phase 0: 在提取任何子帧之前生成点云。点云只在前端打开点云时按低频生成。
+    if (shouldBuildPointCloud) {
         err = nullptr;
         ob_frame* aligned = ob_filter_process(alignFilter_, frameset, &err);
         if (err) {
@@ -377,7 +390,12 @@ void OrbbecCamera::onFrameSetCallback(ob_frame* frameset) {
                 err = nullptr;
             } else if (pcFrame) {
                 void* pcData = ob_frame_get_data(pcFrame, &err);
-                uint32_t pcSize = ob_frame_get_data_size(pcFrame, &err);
+                if (err) { ob_delete_error(err); err = nullptr; }
+                uint32_t pcSize = 0;
+                if (pcData) {
+                    pcSize = ob_frame_get_data_size(pcFrame, &err);
+                    if (err) { ob_delete_error(err); pcSize = 0; err = nullptr; }
+                }
                 if (!err && pcData && pcSize > 0) {
                     // 获取坐标缩放因子（原始数据需乘以 scale 得到毫米单位）
                     err = nullptr;
@@ -386,14 +404,15 @@ void OrbbecCamera::onFrameSetCallback(ob_frame* frameset) {
 
                     // OB_FORMAT_RGB_POINT (20): 每个 OBColorPoint = {x,y,z,r,g,b} 各 float
                     int pointCount = pcSize / sizeof(OBColorPoint);
-                    if (pointCount > 0) {
+                    if (pointCount > 0 && pcSize >= sizeof(OBColorPoint)) {
                         auto* srcPts = (OBColorPoint*)pcData;
                         std::vector<float> pts(pointCount * 6);
                         for (int j = 0; j < pointCount; j++) {
                             pts[j*6+0] = srcPts[j].x * scale;
                             pts[j*6+1] = srcPts[j].y * scale;
                             pts[j*6+2] = srcPts[j].z * scale;
-                            pts[j*6+3] = srcPts[j].b;  // BGR → RGB: 交换 R 和 B
+                            // 前端点云彩色模式按 BGR 顺序还原显示，保持与相机预览色彩一致。
+                            pts[j*6+3] = srcPts[j].b;
                             pts[j*6+4] = srcPts[j].g;
                             pts[j*6+5] = srcPts[j].r;
                         }

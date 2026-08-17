@@ -58,23 +58,30 @@ def read_imu(path):
 
 def read_gripper(path):
     rows = []
+    is_electric = False
     if not os.path.exists(path):
-        return rows
+        return rows, is_electric
     with open(path, newline='') as f:
         reader = csv.DictReader(f)
         fieldnames = reader.fieldnames or []
+        is_electric = 'position_deg' in fieldnames
         for r in reader:
-            # 新格式使用 position 列表示夹爪闭合比例。
-            if 'position' in fieldnames:
-                close_ratio = float(r['position'])
+            if is_electric:
+                rows.append({
+                    'ts': aligned_ts(r),
+                    'position_deg': float(r.get('position_deg') or 0),
+                    'velocity_rpm': float(r.get('velocity_rpm') or 0),
+                    'current_a': float(r.get('current_a') or 0),
+                })
             else:
-                close_ratio = float(r['close_ratio'])
-            rows.append({
-                'ts': aligned_ts(r),
-                'close_ratio': close_ratio,
-            })
+                # UMI 2.0 使用 position，旧数据使用 close_ratio。
+                close_ratio = float(r.get('position') or r.get('close_ratio') or 0)
+                rows.append({
+                    'ts': aligned_ts(r),
+                    'close_ratio': close_ratio,
+                })
     rows.sort(key=lambda x: x['ts'])
-    return rows
+    return rows, is_electric
 
 
 def read_pose(path):
@@ -135,16 +142,25 @@ def align_imu(imu_rows, video_timestamps, n, fps):
     return states
 
 
-def align_gripper(gripper_rows, video_timestamps, device_offset_us, n, fps):
+def align_gripper(gripper_rows, video_timestamps, device_offset_us, n, fps, is_electric=False):
+    state_dim = 3 if is_electric else 1
     if not gripper_rows or n == 0:
-        return [[0.0]] * n
-    converted = [{'ts': r['ts'] - device_offset_us, 'close_ratio': r['close_ratio']} for r in gripper_rows]
+        return [[0.0] * state_dim for _ in range(n)]
+    converted = [
+        {'ts': r['ts'] - device_offset_us, **{key: value for key, value in r.items() if key != 'ts'}}
+        for r in gripper_rows
+    ]
     converted.sort(key=lambda x: x['ts'])
     states = []
     for i in range(n):
         ft = _get_frame_ts(video_timestamps, i, fps)
         r = _binary_search_ts(converted, ft)
-        states.append([r['close_ratio']] if r else [0.0])
+        if not r:
+            states.append([0.0] * state_dim)
+        elif is_electric:
+            states.append([r['position_deg'], r['velocity_rpm'], r['current_a']])
+        else:
+            states.append([r['close_ratio']])
     return states
 
 
@@ -162,11 +178,20 @@ def align_pose(pose_rows, video_timestamps, device_offset_us, n, fps):
     return states
 
 
-# --- 轻量级 TFRecord 写入器（不依赖 TensorFlow）---
+# --- 轻量级 TFRecord 写入器（不依赖 TensorFlow 或 crcmod）---
 # TFRecord 基础结构：uint64 长度 | 长度 CRC | 数据内容 | 数据 CRC。
+def _crc32c(data):
+    """计算 TFRecord 使用的 CRC32C（Castagnoli）校验值。"""
+    crc = 0xffffffff
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ (0x82f63b78 if crc & 1 else 0)
+    return (~crc) & 0xffffffff
+
+
 def _masked_crc32c(data):
-    import crcmod
-    crc = crcmod.predefined.mkCrcFun('crc-32c')(data)
+    crc = _crc32c(data)
     return (((crc >> 15) | (crc << 17)) + 0xa282ead8) & 0xffffffff
 
 def _write_tfrecord(path, records):
@@ -229,6 +254,8 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, slot_meta, p
     frame_counts = slot_meta.get('frameCount', {})
     imu_count = slot_meta.get('imuCount', 0)
     gripper_count = slot_meta.get('gripperCount', 0)
+    gripper_meta = slot_meta.get('gripper', {}) or {}
+    electric_gripper_count = gripper_meta.get('electricFrames', 0)
 
     # 判断夹爪 CSV 文件名：新格式为 gripper.csv，旧格式为 gripper_data.csv。
     gripper_csv_new = os.path.join(source_dir, 'gripper_data', 'gripper.csv')
@@ -239,7 +266,7 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, slot_meta, p
         gripper_csv = gripper_csv_old
 
     has_imu = imu_count > 0 and os.path.exists(os.path.join(source_dir, 'imu_data', 'imu_data.csv'))
-    has_gripper = gripper_count > 0 and os.path.exists(gripper_csv)
+    has_gripper = (gripper_count > 0 or electric_gripper_count > 0) and os.path.exists(gripper_csv)
     pose_path = os.path.join(source_dir, 'pose_data', 'pose_data.csv')
     has_pose = os.path.exists(pose_path) and slot_meta.get('pose', {}).get('frames', 0) > 0
 
@@ -293,8 +320,12 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, slot_meta, p
     imu_rows = read_imu(os.path.join(source_dir, 'imu_data', 'imu_data.csv'))
     imu_states = align_imu(imu_rows, video_timestamps, nframes, fps) if has_imu else [[0.0] * 6] * nframes
 
-    gripper_rows = read_gripper(gripper_csv)
-    gripper_states = align_gripper(gripper_rows, video_timestamps, device_offset_us, nframes, fps) if has_gripper else [[0.0]] * nframes
+    gripper_rows, is_electric_gripper = read_gripper(gripper_csv)
+    gripper_dim = 3 if is_electric_gripper else 1
+    gripper_states = (
+        align_gripper(gripper_rows, video_timestamps, device_offset_us, nframes, fps, is_electric_gripper)
+        if has_gripper else [[0.0] * gripper_dim for _ in range(nframes)]
+    )
 
     pose_rows = read_pose(pose_path) if has_pose else []
     pose_states = align_pose(pose_rows, video_timestamps, device_offset_us, nframes, fps) if has_pose else None
@@ -322,22 +353,21 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, slot_meta, p
     # 写入 TFRecord 文件。
     write_progress(progress_file, 0.50, f"{label_prefix}Writing TFRecord...")
     tfrecord_path = os.path.join(data_dir, 'train-00000-of-00001.tfrecord')
-    try:
-        _write_tfrecord(tfrecord_path, records)
-    except ImportError:
-        # 兜底：缺少 crcmod 时写 JSONL，保证转换结果仍可检查。
-        write_progress(progress_file, 0.50, f"{label_prefix}crcmod not found, writing JSONL fallback...")
-        jsonl_path = os.path.join(data_dir, 'train-00000-of-00001.jsonl')
-        with open(jsonl_path, 'w') as f:
-            for rec in records:
-                f.write(rec.decode('utf-8') + '\n')
+    _write_tfrecord(tfrecord_path, records)
+    # 清理由旧版缺少 crcmod 时产生的回退文件，避免同一分片出现两种载体。
+    jsonl_path = os.path.join(data_dir, 'train-00000-of-00001.jsonl')
+    if os.path.exists(jsonl_path):
+        os.remove(jsonl_path)
 
     # 写入 features.json。
     state_labels = []
     if has_imu:
         state_labels += ['accel_x', 'accel_y', 'accel_z', 'gyro_x', 'gyro_y', 'gyro_z']
     if has_gripper:
-        state_labels += ['close_ratio']
+        if is_electric_gripper:
+            state_labels += ['position_deg', 'velocity_rpm', 'current_a']
+        else:
+            state_labels += ['close_ratio']
     if has_pose:
         state_labels += ['pos_x', 'pos_y', 'pos_z', 'quat_x', 'quat_y', 'quat_z', 'quat_w']
 
@@ -366,6 +396,7 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, slot_meta, p
         'actionDim': 7,
         'hasIMU': has_imu,
         'hasGripper': has_gripper,
+        'gripperType': 'electric' if has_gripper and is_electric_gripper else ('manual' if has_gripper else 'none'),
         'hasPose': has_pose,
         'videos': {vtype: {'width': video_info[vtype]['width'], 'height': video_info[vtype]['height'],
                            'frames': video_info[vtype]['frames'], 'file': video_info[vtype]['file']}

@@ -39,6 +39,7 @@
             <button class="nav-tab active" data-page="monitor">夹爪监控</button>
             <button class="nav-tab" data-page="collect">数据采集</button>
             <button class="nav-tab" data-page="convert">数据转换</button>
+            <button class="nav-tab" data-page="camera">相机控制</button>
             <button class="nav-tab" data-page="control">夹爪控制</button>
             <button class="nav-tab" data-page="electric">电动夹爪控制</button>
             <button class="nav-tab" data-page="rps">剪刀石头布</button>
@@ -376,6 +377,104 @@
                         <div class="empty-state">暂无转换记录</div>
                     </div>
                 </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- Page: 相机控制 -->
+    <div class="page" id="page-camera" style="display:none">
+        <div class="camera-control-layout">
+            <aside class="camera-control-sidebar">
+                <div class="rps-card">
+                    <div class="rps-card-title">相机选择</div>
+                    <select class="eg-input" id="camCtrlSelect">
+                        <option value="">正在读取相机...</option>
+                    </select>
+                    <div class="camera-control-device" id="camCtrlDeviceInfo">未选择相机</div>
+                    <div class="rps-btn-row">
+                        <button class="eg-btn eg-btn-outline" id="camCtrlRefreshBtn">刷新</button>
+                        <button class="eg-btn eg-btn-outline" id="camCtrlResetBtn">重置</button>
+                    </div>
+                </div>
+
+                <div class="rps-card">
+                    <div class="rps-card-title">预设</div>
+                    <div class="camera-preset-grid">
+                        <button class="eg-btn eg-btn-outline" data-camera-preset="normal">标准</button>
+                        <button class="eg-btn eg-btn-outline" data-camera-preset="bright">偏暗增强</button>
+                        <button class="eg-btn eg-btn-outline" data-camera-preset="sharp">清晰锐化</button>
+                        <button class="eg-btn eg-btn-outline" data-camera-preset="soft">低噪声</button>
+                    </div>
+                    <div class="rps-small-status" id="camCtrlApplyStatus">参数会实时作用于预览和录制</div>
+                </div>
+
+                <div class="rps-card camera-hardware-card" id="camCtrlHardwareCard">
+                    <div class="rps-card-title">SDK 硬件参数</div>
+                    <label class="rps-toggle-line"><input type="checkbox" id="camExposureAuto">自动曝光</label>
+                    <div class="camera-slider-row" data-camera-field="exposureTime">
+                        <div><span>曝光时间</span><b id="camExposureTimeVal">15000 us</b></div>
+                        <input type="range" id="camExposureTime" min="100" max="50000" step="100" value="15000">
+                    </div>
+                    <div class="camera-slider-row" data-camera-field="exposureUpper">
+                        <div><span>曝光上限</span><b id="camExposureUpperVal">25000 us</b></div>
+                        <input type="range" id="camExposureUpper" min="1000" max="80000" step="500" value="25000">
+                    </div>
+                    <label class="rps-toggle-line"><input type="checkbox" id="camGainAuto">自动增益</label>
+                    <div class="camera-slider-row" data-camera-field="gain">
+                        <div><span>增益</span><b id="camGainVal">3.0 dB</b></div>
+                        <input type="range" id="camGain" min="0" max="24" step="0.1" value="3">
+                    </div>
+                    <label class="rps-toggle-line"><input type="checkbox" id="camWhiteAuto">自动白平衡</label>
+                </div>
+            </aside>
+
+            <main class="camera-control-main">
+                <section class="camera-preview-card">
+                    <div class="video-card-header">
+                        <span id="camCtrlPreviewTitle">相机预览</span>
+                        <span class="fps-badge" id="camCtrlPreviewFps">-- fps</span>
+                        <span class="tag" id="camCtrlPreviewTag">Color</span>
+                    </div>
+                    <div class="camera-preview-frame">
+                        <img id="camCtrlPreviewImg" alt="camera preview">
+                        <div class="placeholder" id="camCtrlPreviewPlaceholder">请选择相机</div>
+                    </div>
+                </section>
+
+                <section class="camera-control-grid">
+                    <div class="camera-param-card">
+                        <div class="eg-card-title">画面基础调整</div>
+                        <div class="camera-slider-row">
+                            <div><span>亮度</span><b id="camBrightnessVal">8</b></div>
+                            <input type="range" id="camBrightness" min="-100" max="100" step="1" value="8">
+                        </div>
+                        <div class="camera-slider-row">
+                            <div><span>对比度</span><b id="camContrastVal">1.05</b></div>
+                            <input type="range" id="camContrast" min="0.2" max="3" step="0.01" value="1.05">
+                        </div>
+                        <div class="camera-slider-row">
+                            <div><span>Gamma</span><b id="camGammaVal">1.00</b></div>
+                            <input type="range" id="camGamma" min="0.2" max="4" step="0.01" value="1">
+                        </div>
+                        <label class="rps-toggle-line"><input type="checkbox" id="camGammaEnable" checked>启用 Gamma</label>
+                    </div>
+
+                    <div class="camera-param-card">
+                        <div class="eg-card-title">色彩与清晰度</div>
+                        <div class="camera-slider-row">
+                            <div><span>饱和度</span><b id="camSaturationVal">1.00</b></div>
+                            <input type="range" id="camSaturation" min="0" max="3" step="0.01" value="1">
+                        </div>
+                        <div class="camera-slider-row">
+                            <div><span>锐化</span><b id="camSharpnessVal">1.00</b></div>
+                            <input type="range" id="camSharpness" min="0" max="8" step="0.1" value="1">
+                        </div>
+                        <div class="camera-slider-row">
+                            <div><span>降噪</span><b id="camDenoiseVal">1.20</b></div>
+                            <input type="range" id="camDenoise" min="0" max="10" step="0.1" value="1.2">
+                        </div>
+                    </div>
+                </section>
             </main>
         </div>
     </div>
@@ -954,7 +1053,7 @@
                     <div class="teleop-two-col">
                         <div class="eg-ctrl-field">
                             <label>目标速度(rpm) <span class="eg-range-hint">1~3276</span></label>
-                            <input type="number" id="teleopSpeedInput" value="3000" min="1" max="3276" step="1" class="eg-input">
+                            <input type="number" id="teleopSpeedInput" value="3276" min="1" max="3276" step="1" class="eg-input">
                         </div>
                         <div class="eg-ctrl-field">
                             <label>电流(A) <span class="eg-range-hint">默认 1.2</span></label>
@@ -963,13 +1062,17 @@
                     </div>
                     <div class="teleop-two-col">
                         <div class="eg-ctrl-field">
-                            <label>间隔(ms)</label>
-                            <input type="number" id="teleopIntervalInput" value="80" min="40" max="500" step="10" class="eg-input">
+                            <label>响应加速度(rad/s²) <span class="eg-range-hint">1~600</span></label>
+                            <input type="number" id="teleopAccelerationInput" value="300" min="1" max="600" step="10" class="eg-input">
                         </div>
                         <div class="eg-ctrl-field">
-                            <label>死区(°)</label>
-                            <input type="number" id="teleopDeadbandInput" value="20" min="0" max="300" step="1" class="eg-input">
+                            <label>更新间隔(ms)</label>
+                            <input type="number" id="teleopIntervalInput" value="50" min="40" max="500" step="10" class="eg-input">
                         </div>
+                    </div>
+                    <div class="eg-ctrl-field">
+                        <label>跟随死区(°) <span class="eg-range-hint">越小越灵敏</span></label>
+                        <input type="number" id="teleopDeadbandInput" value="10" min="0" max="300" step="1" class="eg-input">
                     </div>
                     <div class="rps-btn-row">
                         <button class="eg-btn eg-btn-primary" id="teleopStartBtn">开始遥控</button>
@@ -1065,6 +1168,6 @@
         </div>
     </div>
 </body>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="/lib/mediapipe/hands.js"></script>
 <script src="/script.js?v=20260602deviceonly"></script>
 </html>

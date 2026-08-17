@@ -5,6 +5,8 @@
 
 #include "ICamera.hpp"
 #include <atomic>
+#include <chrono>
+#include <functional>
 #include <mutex>
 #include <thread>
 
@@ -36,6 +38,12 @@ public:
 
     bool getIntrinsics(float& fx, float& fy, float& cx, float& cy) const override;
 
+    // 点云计算开销很大，由上层告知当前是否真的需要生成点云。
+    void setPointCloudEnabledProvider(std::function<bool()> provider);
+
+    // 根据页面开关调整相机实际传输的硬件流。红外模式需要同步启用深度和双红外。
+    bool setRequestedStreams(bool depthEnabled, bool irEnabled);
+
 private:
     void initCapabilities();
     void onFrameSetCallback(ob_frame* frameset);
@@ -62,6 +70,11 @@ private:
 
     float fx_ = 0, fy_ = 0, cx_ = 0, cy_ = 0;
     bool hasIntrinsics_ = false;
+    std::function<bool()> pointCloudEnabledProvider_;
+    std::chrono::steady_clock::time_point lastPointCloudTime_{};
+    std::mutex streamReconfigureMutex_;
+    bool requestedDepth_ = false;
+    bool requestedIR_ = false;
 
     // 帧格式转换
     static cv::Mat convertColorFrame(ob_frame* frame);
@@ -87,6 +100,8 @@ public:
     bool hasIRStream() const override { return false; }
     bool startStreaming() override { return false; }
     void stopStreaming() override {}
+    void setPointCloudEnabledProvider(std::function<bool()>) {}
+    bool setRequestedStreams(bool, bool) { return false; }
 };
 
 #endif // NO_ORBBEC_CAMERA

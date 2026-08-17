@@ -22,6 +22,10 @@ public:
         return camera_.isOpened();
     }
 
+    bool isDevicePresent() const {
+        return camera_.isDevicePresent();
+    }
+
     std::string getDeviceName() const override {
         return camera_.getDeviceName();
     }
@@ -42,6 +46,12 @@ public:
     cv::Mat readColor() override {
         return camera_.read();
     }
+
+    bool setCameraControls(const CameraControlParams& params) override {
+        return camera_.setCameraControls(params);
+    }
+
+    bool supportsHardwareControls() const override { return true; }
 
 private:
     HikCamera camera_;

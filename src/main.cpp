@@ -18,6 +18,7 @@
 #include <iostream>
 #include <cstdio>
 #include <map>
+#include <memory>
 #include <winsock2.h>
 #include <windows.h>
 
@@ -35,6 +36,21 @@ static std::string getExecutableDir() {
 
 static volatile LONG g_running = 1;
 static volatile LONG g_stopCount = 0;
+
+// 页面未打开预览时也低频保留最新彩色帧。这样刷新页面后可以立即显示缓存画面，
+// 不必先等待相机下一帧；预览开启后仍按配置的帧间隔发布，不增加正常推流延迟。
+static bool shouldPublishColorFrame(HttpServer& server, const std::string& slot,
+                                    uint64_t nowMs, uint64_t& lastPublishMs,
+                                    int activeIntervalMs) {
+    constexpr uint64_t IDLE_CACHE_INTERVAL_MS = 1000;
+    const bool active = server.isStreamActive(slot, "color") || server.isStreamActive("color");
+    const uint64_t intervalMs = active
+        ? static_cast<uint64_t>(activeIntervalMs > 0 ? activeIntervalMs : 1)
+        : IDLE_CACHE_INTERVAL_MS;
+    if (lastPublishMs != 0 && nowMs - lastPublishMs < intervalMs) return false;
+    lastPublishMs = nowMs;
+    return true;
+}
 
 // 崩溃日志：捕获段错误并写入文件，方便定位
 static std::string g_exeDir;
@@ -204,6 +220,8 @@ int main(int argc, char* argv[]) {
             cameraThreads.emplace_back([cam, &server, slotName, frameSkipMs]() {
                 uint64_t lastTime = 0;
                 auto lastFrameTime = std::chrono::steady_clock::now();
+                auto lastPresenceCheck = lastFrameTime;
+                auto lastRecoveryAttempt = lastFrameTime;
                 std::string camSerial = cam->getSerialNumber();
                 int reconnectFailures = 0;
                 fprintf(stderr, "[%s] 海康相机热插拔线程已启动 (SN: %s)\n", slotName.c_str(), camSerial.c_str());
@@ -213,20 +231,34 @@ int main(int argc, char* argv[]) {
                     if (frame.empty()) {
                         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                             std::chrono::steady_clock::now() - lastFrameTime).count();
-                        if (elapsed >= 5) {
+                        auto nowSteady = std::chrono::steady_clock::now();
+                        bool shouldRecover = false;
+                        if (elapsed >= 5 &&
+                            std::chrono::duration_cast<std::chrono::seconds>(nowSteady - lastPresenceCheck).count() >= 2) {
+                            lastPresenceCheck = nowSteady;
+                            auto* hik = dynamic_cast<HikCameraAdapter*>(cam);
+                            const bool present = hik && hik->isDevicePresent();
+                            const bool longStall = elapsed >= 30 &&
+                                std::chrono::duration_cast<std::chrono::seconds>(nowSteady - lastRecoveryAttempt).count() >= 30;
+                            shouldRecover = !present || longStall;
+                        }
+                        if (shouldRecover) {
+                            lastRecoveryAttempt = nowSteady;
                             cam->close();
                             std::this_thread::sleep_for(std::chrono::milliseconds(500));
                             if (!cam->open(0, camSerial)) {
                                 reconnectFailures++;
-                                if (reconnectFailures >= 3) {
-                                    fprintf(stderr, "[%s] Hikvision camera reconnect failed repeatedly, thread exits (SN: %s)\n",
-                                            slotName.c_str(), camSerial.c_str());
-                                    break;
+                                if (reconnectFailures == 1 || reconnectFailures % 10 == 0) {
+                                    fprintf(stderr, "[%s] 海康相机暂未恢复，后台继续重试 (SN: %s, 次数=%d)\n",
+                                            slotName.c_str(), camSerial.c_str(), reconnectFailures);
                                 }
                                 std::this_thread::sleep_for(std::chrono::seconds(5));
                                 continue;
                             }
                             reconnectFailures = 0;
+                            // 重新打开后重新开始看门狗计时，给USB链路留出首帧建立时间。
+                            // 否则旧时间戳仍超过阈值，会在首帧到达前反复关闭刚打开的相机。
+                            lastFrameTime = std::chrono::steady_clock::now();
                         }
                         std::this_thread::sleep_for(std::chrono::milliseconds(5));
                         continue;
@@ -242,11 +274,8 @@ int main(int argc, char* argv[]) {
                     }
                     auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()).count();
-                    if (server.isStreamActive(slotName, "color") || server.isStreamActive("color")) {
-                        if (now - lastTime >= frameSkipMs) {
-                            lastTime = now;
-                            server.updateColorFrame(slotName, frame);
-                        }
+                    if (shouldPublishColorFrame(server, slotName, now, lastTime, frameSkipMs)) {
+                        server.updateColorFrame(slotName, frame);
                     }
                 }
             });
@@ -260,17 +289,14 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            cam->setColorCallback([&server, slotName, frameSkipMs, &slamManagers](const cv::Mat& frame, uint64_t) {
-                static std::map<std::string, uint64_t> lastTimeMap;
-                uint64_t& lastTime = lastTimeMap[slotName];
+            auto colorPublishMs = std::make_shared<uint64_t>(0);
+            cam->setColorCallback([&server, slotName, frameSkipMs, &slamManagers, colorPublishMs](const cv::Mat& frame, uint64_t) {
+                uint64_t& lastTime = *colorPublishMs;
                 server.tickCaptureFrame(slotName, "color");
                 auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
-                if (server.isStreamActive(slotName, "color") || server.isStreamActive("color")) {
-                    if (now - lastTime >= frameSkipMs) {
-                        lastTime = now;
-                        server.updateColorFrame(slotName, frame);
-                    }
+                if (shouldPublishColorFrame(server, slotName, now, lastTime, frameSkipMs)) {
+                    server.updateColorFrame(slotName, frame);
                 }
                 if (server.isRecording()) {
                     uint64_t ts = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -289,9 +315,9 @@ int main(int argc, char* argv[]) {
                     }
                 }
             });
-            cam->setDepthCallback([&server, slotName, frameSkipMs](const cv::Mat& visualization, const cv::Mat& rawDepth, uint64_t) {
-                static std::map<std::string, uint64_t> lastTimeMap;
-                uint64_t& lastTime = lastTimeMap[slotName];
+            auto depthPublishMs = std::make_shared<uint64_t>(0);
+            cam->setDepthCallback([&server, slotName, frameSkipMs, depthPublishMs](const cv::Mat& visualization, const cv::Mat& rawDepth, uint64_t) {
+                uint64_t& lastTime = *depthPublishMs;
                 server.tickCaptureFrame(slotName, "depth");
                 auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -305,9 +331,9 @@ int main(int argc, char* argv[]) {
                     server.recordFrame(slotName, "depth", rawDepth, ts, rawDepth.cols, rawDepth.rows, "Y16");
                 }
             });
-            cam->setIRLeftCallback([&server, slotName, frameSkipMs](const cv::Mat& irFrame, uint64_t) {
-                static std::map<std::string, uint64_t> lastTimeMap;
-                uint64_t& lastTime = lastTimeMap[slotName + "_irl"];
+            auto irLeftPublishMs = std::make_shared<uint64_t>(0);
+            cam->setIRLeftCallback([&server, slotName, frameSkipMs, irLeftPublishMs](const cv::Mat& irFrame, uint64_t) {
+                uint64_t& lastTime = *irLeftPublishMs;
                 server.tickCaptureFrame(slotName, "ir-left");
                 auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -321,9 +347,9 @@ int main(int argc, char* argv[]) {
                     server.recordFrame(slotName, "ir-left", irFrame, ts, irFrame.cols, irFrame.rows, "Y8");
                 }
             });
-            cam->setIRRightCallback([&server, slotName, frameSkipMs](const cv::Mat& irFrame, uint64_t) {
-                static std::map<std::string, uint64_t> lastTimeMap;
-                uint64_t& lastTime = lastTimeMap[slotName + "_irr"];
+            auto irRightPublishMs = std::make_shared<uint64_t>(0);
+            cam->setIRRightCallback([&server, slotName, frameSkipMs, irRightPublishMs](const cv::Mat& irFrame, uint64_t) {
+                uint64_t& lastTime = *irRightPublishMs;
                 server.tickCaptureFrame(slotName, "ir-right");
                 auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -343,6 +369,11 @@ int main(int argc, char* argv[]) {
                     server.updatePointCloudData(slotName, points, width, height);
                 }
             });
+            if (auto* orbbec = dynamic_cast<OrbbecCamera*>(cam)) {
+                orbbec->setPointCloudEnabledProvider([&server, slotName]() {
+                    return server.isStreamActive(slotName, "pointcloud");
+                });
+            }
             if (!cam->startStreaming()) {
                 fprintf(stderr, "[%s] 热插拔 Orbbec 流启动失败\n", slotName.c_str());
             } else {
@@ -437,7 +468,10 @@ int main(int argc, char* argv[]) {
             cameraThreads.emplace_back([cam, &server, slotPos, frameSkipMs]() {
                 uint64_t lastTime = 0;
                 auto lastFrameTime = std::chrono::steady_clock::now();
+                auto lastPresenceCheck = lastFrameTime;
+                auto lastRecoveryAttempt = lastFrameTime;
                 std::string camSerial = cam->getSerialNumber();
+                int reconnectFailures = 0;
                 fprintf(stderr, "[%s] 海康相机线程已启动 (SN: %s)\n", slotPos.c_str(), camSerial.c_str());
 
                 while (g_running) {
@@ -445,22 +479,42 @@ int main(int argc, char* argv[]) {
                     if (frame.empty()) {
                         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                             std::chrono::steady_clock::now() - lastFrameTime).count();
-                        if (elapsed >= 5) {
+                        auto nowSteady = std::chrono::steady_clock::now();
+                        bool shouldRecover = false;
+                        if (elapsed >= 5 &&
+                            std::chrono::duration_cast<std::chrono::seconds>(nowSteady - lastPresenceCheck).count() >= 2) {
+                            lastPresenceCheck = nowSteady;
+                            auto* hik = dynamic_cast<HikCameraAdapter*>(cam);
+                            const bool present = hik && hik->isDevicePresent();
+                            const bool longStall = elapsed >= 30 &&
+                                std::chrono::duration_cast<std::chrono::seconds>(nowSteady - lastRecoveryAttempt).count() >= 30;
+                            shouldRecover = !present || longStall;
+                        }
+                        if (shouldRecover) {
+                            lastRecoveryAttempt = nowSteady;
                             fprintf(stderr, "[%s] 相机看门狗触发\n", slotPos.c_str());
                             cam->close();
                             std::this_thread::sleep_for(std::chrono::milliseconds(500));
                             if (!cam->open(0, camSerial)) {
-                                fprintf(stderr, "[%s] Hikvision camera reconnect failed, thread exits (SN: %s)\n",
-                                        slotPos.c_str(), camSerial.c_str());
-                                break;
+                                reconnectFailures++;
+                                if (reconnectFailures == 1 || reconnectFailures % 10 == 0) {
+                                    fprintf(stderr, "[%s] 海康相机暂未恢复，后台继续重试 (SN: %s, 次数=%d)\n",
+                                            slotPos.c_str(), camSerial.c_str(), reconnectFailures);
+                                }
+                                std::this_thread::sleep_for(std::chrono::seconds(5));
+                                continue;
                             }
+                            reconnectFailures = 0;
                             fprintf(stderr, "[%s] 相机重连成功\n", slotPos.c_str());
+                            // 重新打开后等待首帧，不使用重连前的超时时间继续触发看门狗。
+                            lastFrameTime = std::chrono::steady_clock::now();
                         }
                         std::this_thread::sleep_for(std::chrono::milliseconds(5));
                         continue;
                     }
 
                     lastFrameTime = std::chrono::steady_clock::now();
+                    reconnectFailures = 0;
                     server.tickCaptureFrame(slotPos, "color");
 
                     if (server.isRecording()) {
@@ -471,31 +525,25 @@ int main(int argc, char* argv[]) {
 
                     auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()).count();
-                    if (server.isStreamActive(slotPos, "color") || server.isStreamActive("color")) {
-                        if (now - lastTime >= frameSkipMs) {
-                            lastTime = now;
-                            server.updateColorFrame(slotPos, frame);
-                        }
+                    if (shouldPublishColorFrame(server, slotPos, now, lastTime, frameSkipMs)) {
+                        server.updateColorFrame(slotPos, frame);
                     }
                 }
             });
         } else if (cam->getDeviceType() == "orbbec") {
             // Orbbec 相机：回调模式
             // 注册彩色帧回调
-            cam->setColorCallback([&server, slotPos, frameSkipMs, &slamManagers](const cv::Mat& frame, uint64_t timestampUs) {
-                static std::map<std::string, uint64_t> lastTimeMap;
-                uint64_t& lastTime = lastTimeMap[slotPos];
+            auto colorPublishMs = std::make_shared<uint64_t>(0);
+            cam->setColorCallback([&server, slotPos, frameSkipMs, &slamManagers, colorPublishMs](const cv::Mat& frame, uint64_t timestampUs) {
+                uint64_t& lastTime = *colorPublishMs;
 
                 server.tickCaptureFrame(slotPos, "color");
 
                 auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
 
-                if (server.isStreamActive(slotPos, "color") || server.isStreamActive("color")) {
-                    if (now - lastTime >= frameSkipMs) {
-                        lastTime = now;
-                        server.updateColorFrame(slotPos, frame);
-                    }
+                if (shouldPublishColorFrame(server, slotPos, now, lastTime, frameSkipMs)) {
+                    server.updateColorFrame(slotPos, frame);
                 }
 
                 if (server.isRecording()) {
@@ -526,9 +574,9 @@ int main(int argc, char* argv[]) {
             });
 
             // 注册深度帧回调
-            cam->setDepthCallback([&server, slotPos, frameSkipMs, cfg](const cv::Mat& visualization, const cv::Mat& rawDepth, uint64_t timestampUs) {
-                static std::map<std::string, uint64_t> lastTimeMap;
-                uint64_t& lastTime = lastTimeMap[slotPos];
+            auto depthPublishMs = std::make_shared<uint64_t>(0);
+            cam->setDepthCallback([&server, slotPos, frameSkipMs, cfg, depthPublishMs](const cv::Mat& visualization, const cv::Mat& rawDepth, uint64_t timestampUs) {
+                uint64_t& lastTime = *depthPublishMs;
 
                 server.tickCaptureFrame(slotPos, "depth");
 
@@ -549,9 +597,9 @@ int main(int argc, char* argv[]) {
             });
 
             // 注册左红外帧回调
-            cam->setIRLeftCallback([&server, slotPos, frameSkipMs](const cv::Mat& irFrame, uint64_t timestampUs) {
-                static std::map<std::string, uint64_t> lastTimeMap;
-                uint64_t& lastTime = lastTimeMap[slotPos + "_irl"];
+            auto irLeftPublishMs = std::make_shared<uint64_t>(0);
+            cam->setIRLeftCallback([&server, slotPos, frameSkipMs, irLeftPublishMs](const cv::Mat& irFrame, uint64_t timestampUs) {
+                uint64_t& lastTime = *irLeftPublishMs;
                 server.tickCaptureFrame(slotPos, "ir-left");
                 auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -567,9 +615,9 @@ int main(int argc, char* argv[]) {
                 }
             });
             // 注册右红外帧回调
-            cam->setIRRightCallback([&server, slotPos, frameSkipMs](const cv::Mat& irFrame, uint64_t timestampUs) {
-                static std::map<std::string, uint64_t> lastTimeMap;
-                uint64_t& lastTime = lastTimeMap[slotPos + "_irr"];
+            auto irRightPublishMs = std::make_shared<uint64_t>(0);
+            cam->setIRRightCallback([&server, slotPos, frameSkipMs, irRightPublishMs](const cv::Mat& irFrame, uint64_t timestampUs) {
+                uint64_t& lastTime = *irRightPublishMs;
                 server.tickCaptureFrame(slotPos, "ir-right");
                 auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -593,6 +641,11 @@ int main(int argc, char* argv[]) {
                         server.updatePointCloudData(slotPos, points, width, height);
                     }
                 });
+                if (auto* orbbec = dynamic_cast<OrbbecCamera*>(cam)) {
+                    orbbec->setPointCloudEnabledProvider([&server, slotPos]() {
+                        return server.isStreamActive(slotPos, "pointcloud");
+                    });
+                }
                 fprintf(stderr, "[%s] 点云回调已注册\n", slotPos.c_str());
             }
 
@@ -619,7 +672,9 @@ int main(int argc, char* argv[]) {
         int refreshTick = 0;
         while (g_running) {
             refreshTick++;
-            if (refreshTick >= 4) {
+            // SDK 枚举会访问 USB 控制器；空槽存在时也不应每两秒反复扫描，
+            // 否则奥比插入或海康取流期间容易产生瞬时资源竞争。手动“重新扫描设备”不受影响。
+            if (refreshTick >= 20) {
                 refreshTick = 0;
                 bool needCameraScan = false;
                 for (auto& slotName : deviceMgr.getSlotNames()) {
@@ -649,6 +704,21 @@ int main(int argc, char* argv[]) {
             }
             for (auto& slotName : deviceMgr.getSlotNames()) activateCameraSlot(slotName);
             for (auto& slotName : deviceMgr.getGripperSlotNames()) activateGripperSlot(slotName);
+
+            // 奥比相机只传输页面当前需要的硬件流。默认只开彩色，避免隐藏的深度和双红外
+            // 长期占用 USB 带宽，导致同一控制器上的海康相机启动缓慢或取流卡顿。
+            for (const auto& slotName : deviceMgr.getSlotNames()) {
+                auto* slot = deviceMgr.getSlot(slotName);
+                if (!slot || !slot->connected || !slot->camera) continue;
+                auto* orbbec = dynamic_cast<OrbbecCamera*>(slot->camera.get());
+                if (!orbbec) continue;
+
+                const bool irEnabled = server.isStreamActive(slotName, "ir-left")
+                    || server.isStreamActive(slotName, "ir-right");
+                const bool depthEnabled = server.isStreamActive(slotName, "depth")
+                    || server.isStreamActive(slotName, "pointcloud") || irEnabled;
+                orbbec->setRequestedStreams(depthEnabled, irEnabled);
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
     });

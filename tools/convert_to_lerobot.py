@@ -259,6 +259,7 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
         frame_counts = slot_meta.get('frameCount', {})
         imu_count = slot_meta.get('imuCount', 0)
         gripper_count = slot_meta.get('gripperCount', 0)
+        electric_gripper_count = (slot_meta.get('gripper', {}) or {}).get('electricFrames', 0)
         pc_count = slot_meta.get('pointCloudCount', 0)
         videos_meta = slot_meta.get('videos', {})
         pose_frames = 0
@@ -273,6 +274,7 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
         frame_counts = meta.get('frameCount', {})
         imu_count = meta.get('imuCount', 0)
         gripper_count = meta.get('gripperCount', 0)
+        electric_gripper_count = (meta.get('gripper', {}) or {}).get('electricFrames', 0)
         pc_count = meta.get('pointCloudCount', 0)
         videos_meta = meta.get('videos', {})
         pose_frames = meta.get('pose', {}).get('frames', 0)
@@ -284,14 +286,15 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
     gripper_path = os.path.join(slot_dir, 'gripper_data', 'gripper.csv')
     gripper_path_old = os.path.join(slot_dir, 'gripper_data', 'gripper_data.csv')
     if os.path.exists(gripper_path):
-        has_gripper = gripper_count > 0
+        has_gripper = gripper_count > 0 or electric_gripper_count > 0
         used_gripper_path = gripper_path
     elif os.path.exists(gripper_path_old):
-        has_gripper = gripper_count > 0
+        has_gripper = gripper_count > 0 or electric_gripper_count > 0
         used_gripper_path = gripper_path_old
     else:
         has_gripper = False
         used_gripper_path = gripper_path_old
+    effective_gripper_count = electric_gripper_count if electric_gripper_count > 0 else gripper_count
 
     has_pc = pc_count > 0
     pose_path = os.path.join(slot_dir, 'pose_data', 'pose_data.csv')
@@ -575,7 +578,8 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
     if has_imu:
         root_meta['imuCount'] = imu_count
     if has_gripper:
-        root_meta['gripperCount'] = gripper_count
+        root_meta['gripperCount'] = effective_gripper_count
+        root_meta['gripperType'] = 'electric' if is_electric else 'manual'
     if has_pc:
         root_meta['pointCloudCount'] = pc_count
     with open(os.path.join(output_dir, 'metadata.json'), 'w') as f:
@@ -589,7 +593,7 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
     if has_imu:
         sources.append(f"imu:{imu_count}")
     if has_gripper:
-        sources.append(f"gripper:{gripper_count}")
+        sources.append(f"gripper:{effective_gripper_count}")
     if has_pc:
         sources.append(f"pc:{pc_count}")
     slot_tag = f"[{slot_name}]" if slot_name else ""

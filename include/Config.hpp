@@ -10,12 +10,25 @@
 struct CameraConfig {
     double fisheyeK1 = -1.0;
     double fisheyeK2 = 0.4;
-    double fisheyeScale = 1.5;
-    double brightness = 15.0;
-    double contrast = 1.1;
+    double fisheyeScale = 1.7;
+    double brightness = 8.0;
+    double contrast = 1.05;
+    bool exposureAuto = false;
+    double exposureTime = 15000.0;
+    double exposureUpper = 25000.0;
+    bool gainAuto = false;
+    double gain = 3.0;
+    bool gammaEnable = true;
+    double gamma = 1.0;
+    int sharpness = 1;
+    double denoise = 1.2;
+    bool balanceWhiteAuto = true;
     int maxWidth = 0;
     int maxHeight = 0;
     int fps = 30;
+    int multiCameraMaxWidth = 1280;
+    int multiCameraMaxHeight = 720;
+    int multiCameraFps = 15;
 };
 
 struct OrbbecStreamConfig {

@@ -22,6 +22,7 @@
 #include "ElectricGripper.hpp"
 #include "Config.hpp"
 #include "DeviceManager.hpp"
+#include "ICamera.hpp"
 
 namespace httplib { class Server; }
 
@@ -63,6 +64,14 @@ struct CameraStreamStates {
     double                  pointCloudCaptureFps = 0;
     uint64_t                _pcCaptureFpsTime = 0;
     uint64_t                _pcCapturePrevCount = 0;
+};
+
+struct CameraControlWebState {
+    std::mutex mutex;
+    CameraControlParams params;
+    bool hasCustomParams = false;
+    bool hardwareApplied = false;
+    uint64_t timestamp = 0;
 };
 
 struct GripperWebState {
@@ -198,6 +207,7 @@ struct RecordingState {
     double fps = 0.0;
     bool fastSaveMode = false;
     std::set<std::string> selectedStreams; // selected stream keys e.g. "left-color"
+    std::set<std::string> recordingOpenedPcSlots; // 仅为录制而开启的 pointcloud 后端槽位，stopRecording 时关闭
     std::vector<std::string> warnings; // recording warnings for frontend display
 
     // 反向槽位映射：后端真实槽位名 -> 前端显示位置名。
@@ -276,6 +286,8 @@ public:
     void updatePoseData(double tx, double ty, double tz,
                         double qx, double qy, double qz, double qw,
                         double roll, double pitch, double yaw, uint64_t timestamp);
+    CameraControlParams getCameraControlParams(const std::string& slot) const;
+    bool setCameraControlParams(const std::string& slot, const CameraControlParams& params, bool applyHardware = true);
 
     bool isStreamActive(const std::string& stream) const;
     void setStreamActive(const std::string& stream, bool active);
@@ -313,6 +325,7 @@ private:
 
     // 多摄像头流状态
     std::map<std::string, CameraStreamStates> cameraStates_;  // slot -> states
+    std::map<std::string, CameraControlWebState> cameraControlStates_;  // slot -> camera image/control params
 
     std::string convertScriptPath_;
     std::string convertOutputDir_;
@@ -339,6 +352,7 @@ private:
     std::string buildCaptureFpsJson();
     std::string buildWarningsJson() const;
     void encodeLoop();
+    cv::Mat applyCameraImageControls(const std::string& slot, const cv::Mat& frame, const std::string& streamType = "color");
     void setupRoutes();
     void setupMultiCameraRoutes();
 

@@ -79,9 +79,22 @@ Config Config::load(const std::string& exeDir) {
     cfg.camera.fisheyeScale = extractNumber(content, "fisheyeScale", cfg.camera.fisheyeScale);
     cfg.camera.brightness = extractNumber(content, "brightness", cfg.camera.brightness);
     cfg.camera.contrast = extractNumber(content, "contrast", cfg.camera.contrast);
+    cfg.camera.exposureAuto = (int)extractNumber(content, "exposureAuto", cfg.camera.exposureAuto ? 1 : 0) != 0;
+    cfg.camera.exposureTime = extractNumber(content, "exposureTime", cfg.camera.exposureTime);
+    cfg.camera.exposureUpper = extractNumber(content, "exposureUpper", cfg.camera.exposureUpper);
+    cfg.camera.gainAuto = (int)extractNumber(content, "gainAuto", cfg.camera.gainAuto ? 1 : 0) != 0;
+    cfg.camera.gain = extractNumber(content, "gain", cfg.camera.gain);
+    cfg.camera.gammaEnable = (int)extractNumber(content, "gammaEnable", cfg.camera.gammaEnable ? 1 : 0) != 0;
+    cfg.camera.gamma = extractNumber(content, "gamma", cfg.camera.gamma);
+    cfg.camera.sharpness = (int)extractNumber(content, "sharpness", cfg.camera.sharpness);
+    cfg.camera.denoise = extractNumber(content, "denoise", cfg.camera.denoise);
+    cfg.camera.balanceWhiteAuto = (int)extractNumber(content, "balanceWhiteAuto", cfg.camera.balanceWhiteAuto ? 1 : 0) != 0;
     cfg.camera.maxWidth = (int)extractNumber(content, "maxWidth", cfg.camera.maxWidth);
     cfg.camera.maxHeight = (int)extractNumber(content, "maxHeight", cfg.camera.maxHeight);
     cfg.camera.fps = (int)extractNumber(content, "fps", cfg.camera.fps);
+    cfg.camera.multiCameraMaxWidth = (int)extractNumber(content, "multiCameraMaxWidth", cfg.camera.multiCameraMaxWidth);
+    cfg.camera.multiCameraMaxHeight = (int)extractNumber(content, "multiCameraMaxHeight", cfg.camera.multiCameraMaxHeight);
+    cfg.camera.multiCameraFps = (int)extractNumber(content, "multiCameraFps", cfg.camera.multiCameraFps);
 
     // 推流配置：控制编码间隔、MJPEG 发送间隔、JPEG 质量和预览宽度。
     cfg.stream.encodeIntervalMs = (int)extractNumber(content, "encodeIntervalMs", cfg.stream.encodeIntervalMs);

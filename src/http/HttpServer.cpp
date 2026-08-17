@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <sstream>
 #include <cstdlib>
+#include <cmath>
 #include <winsock2.h>
 #include <windows.h>
 
@@ -46,6 +47,23 @@ HttpServer::HttpServer(const Config& cfg, const std::string& frontendDir)
     cameraStates_["left"];
     cameraStates_["right"];
     cameraStates_["head"];
+    CameraControlParams defaultCameraControls;
+    defaultCameraControls.brightness = cfg.camera.brightness;
+    defaultCameraControls.contrast = cfg.camera.contrast;
+    defaultCameraControls.gamma = cfg.camera.gamma;
+    defaultCameraControls.saturation = 1.0;
+    defaultCameraControls.sharpness = cfg.camera.sharpness;
+    defaultCameraControls.denoise = cfg.camera.denoise;
+    defaultCameraControls.exposureAuto = cfg.camera.exposureAuto;
+    defaultCameraControls.exposureTime = cfg.camera.exposureTime;
+    defaultCameraControls.exposureUpper = cfg.camera.exposureUpper;
+    defaultCameraControls.gainAuto = cfg.camera.gainAuto;
+    defaultCameraControls.gain = cfg.camera.gain;
+    defaultCameraControls.gammaEnable = cfg.camera.gammaEnable;
+    defaultCameraControls.balanceWhiteAuto = cfg.camera.balanceWhiteAuto;
+    for (const auto& slot : {std::string("left"), std::string("right"), std::string("head")}) {
+        cameraControlStates_[slot].params = defaultCameraControls;
+    }
     gripperWebStates_["left"];
     gripperWebStates_["right"];
     gripperWebStates_["extra"];
@@ -173,9 +191,92 @@ void HttpServer::encodeLoop() {
 
 // ---- 数据更新接口 ----
 
+CameraControlParams HttpServer::getCameraControlParams(const std::string& slot) const {
+    auto it = const_cast<HttpServer*>(this)->cameraControlStates_.find(slot);
+    if (it == const_cast<HttpServer*>(this)->cameraControlStates_.end()) return CameraControlParams();
+    std::lock_guard<std::mutex> lock(it->second.mutex);
+    return it->second.params;
+}
+
+bool HttpServer::setCameraControlParams(const std::string& slot, const CameraControlParams& params, bool applyHardware) {
+    auto& state = cameraControlStates_[slot];
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.params = params;
+        state.hasCustomParams = true;
+        state.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        state.hardwareApplied = false;
+    }
+
+    bool hardwareOk = false;
+    if (applyHardware && deviceManager_) {
+        auto* slotInfo = deviceManager_->getSlot(slot);
+        if (slotInfo && slotInfo->connected && slotInfo->camera) {
+            hardwareOk = slotInfo->camera->setCameraControls(params);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.hardwareApplied = hardwareOk;
+    }
+    return hardwareOk;
+}
+
+cv::Mat HttpServer::applyCameraImageControls(const std::string& slot, const cv::Mat& frame, const std::string& streamType) {
+    if (frame.empty() || streamType != "color") return frame;
+
+    CameraControlParams params = getCameraControlParams(slot);
+    cv::Mat out = frame;
+
+    if (params.contrast != 1.0 || params.brightness != 0.0) {
+        out.convertTo(out, -1, params.contrast, params.brightness);
+    } else if (out.data == frame.data) {
+        out = frame.clone();
+    }
+
+    if (params.gammaEnable && params.gamma > 0.01 && params.gamma != 1.0 && out.depth() == CV_8U) {
+        cv::Mat lut(1, 256, CV_8U);
+        uchar* p = lut.ptr<uchar>();
+        double invGamma = 1.0 / params.gamma;
+        for (int i = 0; i < 256; ++i) {
+            p[i] = cv::saturate_cast<uchar>(std::pow(i / 255.0, invGamma) * 255.0);
+        }
+        cv::LUT(out, lut, out);
+    }
+
+    if (params.saturation != 1.0 && out.channels() == 3 && out.depth() == CV_8U) {
+        cv::Mat hsv;
+        cv::cvtColor(out, hsv, cv::COLOR_BGR2HSV);
+        std::vector<cv::Mat> channels;
+        cv::split(hsv, channels);
+        channels[1].convertTo(channels[1], -1, params.saturation, 0);
+        cv::merge(channels, hsv);
+        cv::cvtColor(hsv, out, cv::COLOR_HSV2BGR);
+    }
+
+    if (params.denoise > 0.0 && out.channels() == 3 && out.depth() == CV_8U) {
+        // 实时多相机预览使用轻量混合降噪，避免 NLM 在多路高清画面下占用过多 CPU。
+        cv::Mat smoothed;
+        cv::GaussianBlur(out, smoothed, cv::Size(3, 3), 0.65);
+        double amount = std::max(0.0, std::min(10.0, params.denoise)) / 10.0;
+        cv::addWeighted(out, 1.0 - amount, smoothed, amount, 0.0, out);
+    }
+
+    if (params.sharpness > 0.0 && out.channels() == 3) {
+        cv::Mat blurred;
+        cv::GaussianBlur(out, blurred, cv::Size(0, 0), 1.0);
+        double amount = std::max(0.0, std::min(5.0, params.sharpness)) * 0.25;
+        cv::addWeighted(out, 1.0 + amount, blurred, -amount, 0, out);
+    }
+
+    return out;
+}
+
 void HttpServer::updateColorFrame(const cv::Mat& mat) {
+    cv::Mat adjusted = applyCameraImageControls("left", mat, "color");
     std::lock_guard<std::mutex> lock(colorState_.mutex);
-    colorState_.mat = mat;
+    colorState_.mat = adjusted;
     colorState_.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     colorState_.hasData = true;
@@ -298,9 +399,10 @@ ElectricGripper* HttpServer::getElectricGripper(const std::string& slot) const {
 void HttpServer::updateColorFrame(const std::string& slot, const cv::Mat& mat) {
     auto it = cameraStates_.find(slot);
     if (it == cameraStates_.end()) return;
+    cv::Mat adjusted = applyCameraImageControls(slot, mat, "color");
     auto& states = it->second;
     std::lock_guard<std::mutex> lock(states.color.mutex);
-    states.color.mat = mat;
+    states.color.mat = adjusted;
     states.color.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     states.color.hasData = true;
@@ -309,7 +411,7 @@ void HttpServer::updateColorFrame(const std::string& slot, const cv::Mat& mat) {
     // 向后兼容：也更新旧的 colorState_（必须加锁，encodeLoop 在另一个线程读）
     if (slot == "left") {
         std::lock_guard<std::mutex> lock2(colorState_.mutex);
-        colorState_.mat = mat;
+        colorState_.mat = adjusted;
         colorState_.timestamp = states.color.timestamp;
         colorState_.hasData = true;
         colorState_.hasRawJpeg = false;

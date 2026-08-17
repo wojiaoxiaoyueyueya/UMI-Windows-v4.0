@@ -307,6 +307,8 @@ body.sidebar-collapsed .sidebar-toggle-btn { left: 6px; }
     position: relative; width: 100%; aspect-ratio: 4/3; background: #0a0a0a;
 }
 .video-frame img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.video-frame.color-frame { aspect-ratio: 16/9; }
+.video-frame.color-frame img { object-fit: cover; }
 .video-frame .pointcloud-canvas { display: block; }
 .video-frame.pc-frame { aspect-ratio: 16/9; }
 .pc-overlay-btns {
@@ -1043,6 +1045,37 @@ body.sidebar-collapsed .sidebar-toggle-btn { left:6px; }
 .eg-icon-query::before { content:'📊'; }
 .eg-icon-accel::before { content:'📈'; }
 
+/* ---- 相机控制 ---- */
+.camera-control-layout { display:flex; height:calc(100vh - 95px); min-height:0; gap:12px; padding:12px; background:var(--bg); overflow:hidden; }
+.camera-control-sidebar { width:320px; height:100%; min-height:0; flex-shrink:0; display:flex; flex-direction:column; gap:10px; overflow-y:auto; overflow-x:hidden; padding:0 6px 18px 0; box-sizing:border-box; scrollbar-width:none; -ms-overflow-style:none; overscroll-behavior:contain; transition:width 0.25s ease, min-width 0.25s ease, padding 0.25s ease; }
+.camera-control-sidebar::-webkit-scrollbar, .camera-control-main::-webkit-scrollbar { display:none; }
+.camera-control-sidebar.collapsed { width:0; min-width:0; padding:0; overflow:hidden; }
+.camera-control-sidebar.collapsed > * { visibility:hidden; opacity:0; pointer-events:none; }
+.camera-control-sidebar .rps-card { flex:0 0 auto; overflow:visible; min-width:0; box-sizing:border-box; }
+.camera-control-sidebar .rps-card-title { white-space:normal; overflow:hidden; text-overflow:ellipsis; }
+.camera-control-sidebar .eg-input { min-width:0; max-width:100%; box-sizing:border-box; }
+.camera-control-sidebar .eg-btn { min-width:0; white-space:normal; line-height:1.25; overflow-wrap:anywhere; }
+.camera-control-sidebar .rps-btn-row { min-width:0; }
+.camera-control-sidebar .rps-toggle-line { min-width:0; align-items:center; line-height:1.35; overflow-wrap:anywhere; }
+.camera-control-sidebar .rps-toggle-line span { min-width:0; }
+.camera-control-main { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; gap:12px; overflow-y:auto; scrollbar-width:none; -ms-overflow-style:none; }
+.camera-control-device { min-height:36px; max-width:100%; padding:8px 10px; border:1px solid var(--border); border-radius:6px; background:#f8fafc; color:var(--text-sub); font-size:12px; line-height:1.45; box-sizing:border-box; overflow-wrap:anywhere; }
+.camera-preset-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:8px; }
+.camera-hardware-card.disabled { opacity:0.58; }
+.camera-preview-card { flex:1; min-height:360px; display:flex; flex-direction:column; background:var(--card-bg); border:1px solid var(--border); border-radius:8px; box-shadow:var(--shadow); overflow:hidden; }
+.camera-preview-frame { position:relative; flex:1; min-height:0; background:#0f172a; display:flex; align-items:center; justify-content:center; }
+.camera-preview-frame img { width:100%; height:100%; object-fit:cover; display:none; }
+.camera-preview-frame.active img { display:block; }
+.camera-preview-frame .placeholder { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:rgba(255,255,255,0.68); font-size:13px; background:#0f172a; }
+.camera-preview-frame.active .placeholder { display:none; }
+.camera-control-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; flex-shrink:0; }
+.camera-param-card { background:var(--card-bg); border:1px solid var(--border); border-radius:8px; box-shadow:var(--shadow); overflow:hidden; padding-bottom:10px; }
+.camera-slider-row { padding:10px 14px 2px; min-width:0; box-sizing:border-box; }
+.camera-slider-row div { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; font-size:12px; color:var(--text-sub); min-width:0; }
+.camera-slider-row span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.camera-slider-row b { color:var(--text); font-family:'SF Mono',SFMono-Regular,Consolas,monospace; font-size:12px; flex-shrink:0; text-align:right; white-space:nowrap; }
+.camera-slider-row input[type="range"] { display:block; width:100%; min-width:0; max-width:100%; accent-color:var(--primary); cursor:pointer; box-sizing:border-box; }
+
 /* ---- 剪刀石头布 ---- */
 .rps-layout { display:flex; height:calc(100vh - 95px); gap:12px; padding:12px; background:var(--bg); overflow:hidden; }
 .rps-sidebar { width:260px; flex-shrink:0; display:flex; flex-direction:column; gap:10px; overflow-y:auto; padding-right:4px; }
@@ -1245,6 +1278,11 @@ body.sidebar-collapsed .sidebar-toggle-btn { left:6px; }
     .eg-bottom-row { grid-template-columns:1fr 1fr; }
 }
 @media (max-width:900px) {
+    .camera-control-layout { flex-direction:column; overflow:auto; height:calc(100vh - 95px); }
+    .camera-control-sidebar { width:100%; height:auto; max-height:320px; flex-direction:row; flex-wrap:wrap; overflow-y:auto; padding:0 0 12px 0; }
+    .camera-control-sidebar .rps-card { flex:1 1 240px; min-width:240px; max-width:100%; }
+    .camera-control-grid { grid-template-columns:1fr; }
+    .camera-preview-card { min-height:300px; }
     .eg-layout { flex-direction:column; }
     .eg-sidebar { width:100%; flex-direction:row; flex-wrap:wrap; }
     .eg-sidebar .eg-card { flex:1; min-width:200px; }

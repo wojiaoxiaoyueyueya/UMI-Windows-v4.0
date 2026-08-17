@@ -252,7 +252,8 @@ void HttpServer::recordFrame(const std::string& slot, const std::string& streamT
     // MP4 的最终 FPS 必须在停止录制后才能确定，因此默认使用严格同步缓存模式。
     // 快速保存模式下则会尽快打开 VideoWriter 并实时写入，停止更快但播放器时长可能轻微偏差。
     // ============================================================
-    cv::Mat videoFrame = makeRecordableFrame(frame);
+    cv::Mat adjustedFrame = (streamType == "color") ? applyCameraImageControls(slot, frame, streamType) : frame;
+    cv::Mat videoFrame = makeRecordableFrame(adjustedFrame);
     std::vector<uint8_t> jpegBuf;
     if (!fastModeSnapshot) {
         std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 95};
@@ -394,6 +395,24 @@ bool HttpServer::startRecording(const std::vector<std::string>& types,
     recordingState_.gripperBackendToDisplay.clear();
     for (const auto& s : streams) recordingState_.selectedStreams.insert(s);
 
+    // 点云采集依赖对应槽位的 pointcloud 流开启（Orbbec 只在流开启时才生成点云）。
+    // 若录制勾选了点云但该流未开，这里主动开启其后端槽位的 pointcloud 流，并记录由录制开启的
+    // 槽位，stopRecording 时再关闭；否则录制期间点云为空、collect 页实时采集频率恒为 0。
+    recordingState_.recordingOpenedPcSlots.clear();
+    for (const auto& s : recordingState_.selectedStreams) {
+        auto dash = s.find('-');
+        if (dash == std::string::npos) continue;
+        if (s.substr(dash + 1) != "pointcloud") continue;
+        std::string displayPos = s.substr(0, dash);
+        std::string backendSlot = displayPos;
+        auto mit = slotMapping.find(displayPos);
+        if (mit != slotMapping.end()) backendSlot = mit->second;
+        if (!isStreamActive(backendSlot, "pointcloud")) {
+            setStreamActive(backendSlot, "pointcloud", true);
+            recordingState_.recordingOpenedPcSlots.insert(backendSlot);
+        }
+    }
+
     // 会话目录采用懒创建策略，只有真正收到视频或夹爪数据时才落盘。
 
     // 辅助判断指定显示位置和流类型是否被选中，键格式如 "left-color"。
@@ -469,13 +488,19 @@ bool HttpServer::startRecording(const std::vector<std::string>& types,
                 fprintf(stderr, "[RECORDING] 跳过 '%s': 无适配数据\n", displayPos);
                 continue;
             }
+            // 用 std::string 做值比较，避免 const char* 指针比较在不同编译器下不稳定。
+            std::string dpos(displayPos);
+            std::string posLabel = (dpos == "left") ? "左" : (dpos == "right") ? "右" : "头";
             if (!hasCamera) {
-                std::string warn = std::string(displayPos == "left" ? "左" : (displayPos == "right" ? "右" : "头")) + "手: 无视频数据，仅录制夹爪数据";
+                std::string warn = posLabel + "手: 无视频数据，仅录制夹爪数据";
                 recordingState_.warnings.push_back(warn);
                 fprintf(stderr, "[RECORDING] %s\n", warn.c_str());
             }
-            if (!hasGripper) {
-                std::string warn = std::string(displayPos == "left" ? "左" : (displayPos == "right" ? "右" : "头")) + "手: 无夹爪数据，仅录制视频数据";
+            // 头部槽位只挂相机、不挂夹爪，“无夹爪”是正常状态，不作为警告弹出，
+            // 避免每次录制都提示“头手: 无夹爪数据”而让用户误以为夹爪数据没保存。
+            // 左/右槽位若无夹爪仍会提示，用于提醒夹爪未连接。
+            if (!hasGripper && dpos != "head") {
+                std::string warn = posLabel + "手: 无夹爪数据，仅录制视频数据";
                 recordingState_.warnings.push_back(warn);
                 fprintf(stderr, "[RECORDING] %s\n", warn.c_str());
             }
@@ -515,6 +540,7 @@ bool HttpServer::startRecording(const std::vector<std::string>& types,
 
 bool HttpServer::stopRecording() {
     FinalizeTask task;
+    std::set<std::string> openedPcSlots;
     {
         std::lock_guard<std::mutex> lock(recordingState_.mutex);
         if (!recordingState_.isRecording) return false;
@@ -531,6 +557,12 @@ bool HttpServer::stopRecording() {
         task.fastSaveMode = recordingState_.fastSaveMode;
         task.slots = std::move(recordingState_.slots);
         task.status = FinalizeTask::PENDING;
+        openedPcSlots = recordingState_.recordingOpenedPcSlots;
+        recordingState_.recordingOpenedPcSlots.clear();
+    }
+    // 关闭仅为录制而开启的点云采集流，不影响用户在监控页主动开启的点云预览。
+    for (const auto& pcSlot : openedPcSlots) {
+        setStreamActive(pcSlot, "pointcloud", false);
     }
 
     {

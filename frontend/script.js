@@ -12,7 +12,7 @@
     // ---- 侧边栏收缩/展开（localStorage 跨页面联动） ----
     var SIDEBAR_KEY = 'sidebar_collapsed';
     function syncSidebars(collapsed) {
-        document.querySelectorAll('.sidebar, .collect-sidebar, .eg-sidebar').forEach(function(sb) {
+        document.querySelectorAll('.sidebar, .collect-sidebar, .eg-sidebar, .camera-control-sidebar').forEach(function(sb) {
             if (collapsed) { sb.classList.add('collapsed'); } else { sb.classList.remove('collapsed'); }
         });
         if (collapsed) { document.body.classList.add('sidebar-collapsed'); } else { document.body.classList.remove('sidebar-collapsed'); }
@@ -173,6 +173,16 @@
         return (slotMap[displayPos] || displayPos) + '-' + streamType;
     }
 
+    // 后端实际槽位 → 显示位置（left/right/head）。
+    // 相机控制页用它把后端槽位翻译成和夹爪监控页一致的“左手/右手/头部摄像头”标签，
+    // 这样摄像头左右交换（仅前端 slotMap 变化）后两个页面的标签仍保持同步。
+    function backendSlotToDisplayPos(backendSlot) {
+        for (var displayPos in slotMap) {
+            if (slotMap[displayPos] === backendSlot) return displayPos;
+        }
+        return backendSlot;
+    }
+
     // ---- 页面导航 ----
     var streamPrefs = null;
     function switchPage(pageName) {
@@ -195,9 +205,22 @@
         }
         if (pageName === 'monitor') {
             var prefs = streamPrefs || {};
+            rebuildSlotMap();
             buildCameraToggles();
-            // 恢复之前活跃的流
-            Object.keys(prefs).forEach(function(k) { if (prefs[k]) toggleStream(k, true); });
+            // 恢复之前活跃的流：先把后端流全部打开，待后端开始取流后再重建视频卡片并设置
+            // img.src，避免浏览器在后端流尚未开启时发起 MJPEG 连接导致画面黑屏。
+            var availMap = getAvailableStreamKeyMap();
+            var onPromises = [];
+            Object.keys(prefs).forEach(function(k) {
+                if (!prefs[k] || !availMap[k]) return;
+                state[k] = true;
+                var backendKey = toBackendKey(k);
+                streamBackendKeys[k] = backendKey;
+                updateSwitchUI(k);
+                onPromises.push(fetch('/api/control?stream=' + backendKey + '&action=on').catch(function(){}));
+            });
+            updateActiveCount();
+            Promise.all(onPromises).then(function() { updateVideoCards(true); });
         }
         if (currentPage === 'collect' && recState.pollTimer) {
             clearInterval(recState.pollTimer);
@@ -263,10 +286,14 @@
         state[key] = on;
         updateSwitchUI(key);
         updateActiveCount();
-        updateVideoCards();
-        return fetch('/api/control?stream=' + backendKey + '&action=' + action)
+        var p = fetch('/api/control?stream=' + backendKey + '&action=' + action)
             .then(function() { serverOnline = true; statusDot.classList.add('online'); statusText.textContent = '已连接'; })
             .catch(function() {});
+        // 开流：等后端确认开启后再重建卡片并设置 img.src，避免浏览器在后端取流尚未启动时
+        // 发起 MJPEG 连接导致黑屏；关流：立即移除画面。
+        if (on) p.then(function() { updateVideoCards(); });
+        else updateVideoCards();
+        return p;
     }
 
     // 更新单个开关的 CSS 状态
@@ -775,7 +802,7 @@
     }
 
     // ---- 视频卡片管理 ----
-    function updateVideoCards() {
+    function updateVideoCards(force) {
         var allStreams = [
             {key:'left-color',  label:'左手-彩色',  tag:'RGB'},
             {key:'left-depth',  label:'左手-深度',  tag:'Depth'},
@@ -810,7 +837,7 @@
         var allActiveKeys = Object.keys(activeImgs).concat(Object.keys(pcViewers));
         var prevK = allActiveKeys.filter(function(v, i, a) { return a.indexOf(v) === i; }).sort().join(',');
 
-        if (wantK !== prevK) {
+        if (force || wantK !== prevK) {
             stopAllStreamImgs();
             videoGrid.innerHTML = '';
             if (want.length === 0 && !state['left-gripper'] && !state['right-gripper']) {
@@ -826,10 +853,11 @@
                 var card = document.createElement('div');
                 card.className = 'video-card';
                 var isPointCloud = s.key.indexOf('pointcloud') >= 0;
+                var isColorStream = s.key.indexOf('-color') >= 0;
                 if (isPointCloud) card.style.gridColumn = '1 / -1';
                 var id = isPointCloud ? 'pc_' + s.key : 'img_' + s.key;
                 card.innerHTML = '<div class="video-card-header"><span>'+s.label+'</span><span class="fps-badge" id="fps_'+s.key+'">-- fps</span><span class="tag">'+s.tag+'</span></div>'
-                    +'<div class="video-frame' + (isPointCloud ? ' pc-frame' : '') + '">' + (isPointCloud
+                    +'<div class="video-frame' + (isPointCloud ? ' pc-frame' : '') + (isColorStream ? ' color-frame' : '') + '">' + (isPointCloud
                         ? '<div class="pc-overlay-btns"><button class="pc-mode-btn active" data-mode="depth">深度</button><button class="pc-mode-btn" data-mode="rgb">彩色</button><button class="pc-mode-btn" data-mode="ir">红外</button><button class="pc-mode-btn" data-mode="height">高度</button></div>'
                           +'<canvas id="'+id+'" class="pointcloud-canvas" style="width:100%;height:100%;background:#1a1a2e;"></canvas><div class="placeholder">等待点云数据...</div>'
                         : '<img id="'+id+'" alt="'+s.label+'">') + '<div class="placeholder" style="display:none">等待中...</div></div>';
@@ -937,6 +965,26 @@
                         : '预览编码帧率：仅表示网页 MJPEG 预览刷新速度';
                 }
             }
+            // 点云由前端轮询获取，后端 /api/fps 不总会返回其帧率（依赖点云流开启与统计窗口）。
+            // 用前端实际收到的点云帧计数（streamFps[key].count）兜底，保证点云 badge 不再恒为 '--'。
+            var pcNow = performance.now();
+            Object.keys(fpsOverlays).forEach(function(dispKey) {
+                if (dispKey.indexOf('-pointcloud') < 0) return;
+                var pcEl = fpsOverlays[dispKey];
+                var pcS = streamFps[dispKey];
+                if (!pcEl || !pcS) return;
+                // 若后端已为该点云 badge 写入真实采集帧率，则保留后端值（更准），仅同步基线。
+                if (pcEl.textContent && pcEl.textContent.indexOf('--') < 0) {
+                    pcS._pcPrevCount = pcS.count; pcS._pcPrevTime = pcNow; return;
+                }
+                if (pcS._pcPrevTime) {
+                    var pcDt = (pcNow - pcS._pcPrevTime) / 1000;
+                    var pcDelta = pcS.count - (pcS._pcPrevCount || 0);
+                    if (pcDt > 0 && pcDelta > 0) pcEl.textContent = (pcDelta / pcDt).toFixed(1) + ' fps';
+                }
+                pcS._pcPrevTime = pcNow;
+                pcS._pcPrevCount = pcS.count;
+            });
         }).catch(function() {});
     }, 1000);
 
@@ -948,7 +996,14 @@
     };
 
     function isManualButtonPressed(value) {
+        // V4.0 协议：后端已归一化，0=松开 1=按下
+        // 向后兼容旧协议及 bit-mapped 变体
         return value === 1 || value === 2 || value === true;
+    }
+
+    function isV4ButtonPressed(value) {
+        // V4.0 新协议按键检测：后端归一化后 1=按下，兼容所有非零值
+        return value === 1 || value === true || value > 0;
     }
 
     function handleManualGripperButtons(displayPos, data) {
@@ -957,8 +1012,9 @@
             return;
         }
         var prev = manualGripperButtonState[displayPos] || { button1: false, button2: false };
-        var button1Pressed = isManualButtonPressed(data.button1);
-        var button2Pressed = isManualButtonPressed(data.button2);
+        // V4 协议：后端已归一化，0=松开 1=按下
+        var button1Pressed = isV4ButtonPressed(data.button1);
+        var button2Pressed = isV4ButtonPressed(data.button2);
 
         if (button1Pressed && !prev.button1) {
             triggerManualGripperRecordAction(displayPos, 'start');
@@ -1023,8 +1079,8 @@
         // 按键指示灯：默认绿色，按下变红色，松开回绿
         var btn1El = document.getElementById(prefix + 'Btn1');
         var btn2El = document.getElementById(prefix + 'Btn2');
-        if (btn1El) btn1El.style.background = (data.button1 === 1 || data.button1 === 2) ? '#ef4444' : '#22c55e';
-        if (btn2El) btn2El.style.background = (data.button2 === 1 || data.button2 === 2) ? '#ef4444' : '#22c55e';
+        if (btn1El) btn1El.style.background = (data.button1 === 1 || data.button1 === 2 || data.button1 === true) ? '#ef4444' : '#22c55e';
+        if (btn2El) btn2El.style.background = (data.button2 === 1 || data.button2 === 2 || data.button2 === true) ? '#ef4444' : '#22c55e';
         // 连接状态
         var connEl = document.getElementById(prefix + 'Conn');
         if (connEl) connEl.style.background = data.connected ? '#22c55e' : '#ef4444';
@@ -1687,6 +1743,26 @@
         recState.availableStreams.forEach(function(key) { recState.selectedStreams[key] = shouldSelect; });
         buildRecordToggles();
         showToast(shouldSelect ? '已开启全部可录制项' : '已关闭全部录制项', 'success');
+    }
+
+    // collect 页为显示点云实时频率而开启的点云采集槽位，离开 collect 页时关闭。
+    // 进入时为已连接的 Orbbec 开 pointcloud 流，否则后端没有点云帧率数据，实时频率恒为 '--'。
+    var collectOpenedPcSlots = [];
+    function openCollectPointCloud() {
+        ['left','right','head'].forEach(function(displayPos) {
+            var backendSlot = slotMap[displayPos] || displayPos;
+            var info = deviceInfo[backendSlot] || {};
+            if (info.connected && info.type === 'orbbec') {
+                if (collectOpenedPcSlots.indexOf(backendSlot) < 0) collectOpenedPcSlots.push(backendSlot);
+                fetch('/api/control?stream=' + backendSlot + '-pointcloud&action=on').catch(function(){});
+            }
+        });
+    }
+    function closeCollectPointCloud() {
+        collectOpenedPcSlots.forEach(function(backendSlot) {
+            fetch('/api/control?stream=' + backendSlot + '-pointcloud&action=off').catch(function(){});
+        });
+        collectOpenedPcSlots = [];
     }
 
     function initCollectPage() {
@@ -2797,8 +2873,8 @@
         }
         var btn1El = document.getElementById(prefix + 'Btn1Big');
         var btn2El = document.getElementById(prefix + 'Btn2Big');
-        if (btn1El) btn1El.style.background = (data.button1 === 1 || data.button1 === 2) ? '#ef4444' : '#22c55e';
-        if (btn2El) btn2El.style.background = (data.button2 === 1 || data.button2 === 2) ? '#ef4444' : '#22c55e';
+        if (btn1El) btn1El.style.background = (data.button1 === 1 || data.button1 === 2 || data.button1 === true) ? '#ef4444' : '#22c55e';
+        if (btn2El) btn2El.style.background = (data.button2 === 1 || data.button2 === 2 || data.button2 === true) ? '#ef4444' : '#22c55e';
         var connEl = document.getElementById(prefix + 'CtrlConn');
         if (connEl) {
             connEl.textContent = data.connected ? '已连接' : '未连接';
@@ -2920,6 +2996,11 @@
     // 控制页自动轮询夹爪状态。
     var origSwitchPage = switchPage;
     switchPage = function(pageName) {
+        // 离开当前页的流清理先执行（off）：先关相机控制页预览流和 collect 页点云流，
+        // 再执行 origSwitchPage（进入新页，monitor 恢复会发 on），保证 off 先于 on 到达后端，
+        // 避免回监控页时刚调过参的那台相机被 off 覆盖而黑屏（需手动重开开关才恢复）。
+        if (pageName !== 'camera') stopCameraControlPreview();
+        if (currentPage === 'collect') closeCollectPointCloud();
         origSwitchPage(pageName);
         if (pageName === 'control') {
             fetchGripperStatus();
@@ -2936,6 +3017,10 @@
         } else {
             if (egPollTimer) { clearInterval(egPollTimer); egPollTimer = null; }
         }
+        if (pageName === 'camera') {
+            initCameraControlPage();
+        }
+        if (pageName === 'collect') openCollectPointCloud();
         if (pageName === 'rps') {
             initRpsPage();
         } else {
@@ -2947,6 +3032,294 @@
             stopTeleop(false);
         }
     };
+
+    // ---- 相机控制页 ----
+    var camCtrlState = {
+        initialized: false,
+        currentSlot: '',
+        controls: null,
+        applyTimer: null,
+        previewSlot: '',
+        frameCount: 0,
+        fpsTimer: null
+    };
+
+    function initCameraControlPage() {
+        if (!camCtrlState.initialized) {
+            camCtrlState.initialized = true;
+            bindCameraControlEvents();
+        }
+        // 进入相机控制页时，基于最新设备信息重建显示映射，保证下拉标签和夹爪监控页一致。
+        rebuildSlotMap();
+        refreshCameraControls(true);
+    }
+
+    function bindCameraControlEvents() {
+        var select = document.getElementById('camCtrlSelect');
+        if (select) select.addEventListener('change', function() {
+            camCtrlState.currentSlot = select.value;
+            renderCameraControlFields();
+            startCameraControlPreview();
+        });
+        var refreshBtn = document.getElementById('camCtrlRefreshBtn');
+        if (refreshBtn) refreshBtn.addEventListener('click', function() { refreshCameraControls(false); });
+        var resetBtn = document.getElementById('camCtrlResetBtn');
+        if (resetBtn) resetBtn.addEventListener('click', function() {
+            applyCameraPreset('normal');
+            scheduleCameraControlApply(0);
+        });
+        [
+            'camBrightness','camContrast','camGamma','camSaturation','camSharpness','camDenoise',
+            'camExposureTime','camExposureUpper','camGain'
+        ].forEach(function(id) {
+            var el = document.getElementById(id);
+            if (el) el.addEventListener('input', function() {
+                updateCameraControlLabels();
+                scheduleCameraControlApply(160);
+            });
+        });
+        ['camExposureAuto','camGainAuto','camGammaEnable','camWhiteAuto'].forEach(function(id) {
+            var el = document.getElementById(id);
+            if (el) el.addEventListener('change', function() {
+                updateCameraControlLabels();
+                scheduleCameraControlApply(0);
+            });
+        });
+        document.querySelectorAll('[data-camera-preset]').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                applyCameraPreset(btn.getAttribute('data-camera-preset'));
+                scheduleCameraControlApply(0);
+            });
+        });
+    }
+
+    function refreshCameraControls(keepSelection) {
+        fetch(API_ALT + '/api/camera-controls').then(function(r) { return r.json(); }).then(function(data) {
+            camCtrlState.controls = data || {};
+            renderCameraControlSelect(keepSelection);
+            renderCameraControlFields();
+            startCameraControlPreview();
+        }).catch(function() {
+            var status = document.getElementById('camCtrlApplyStatus');
+            if (status) status.textContent = '相机控制接口暂不可用';
+        });
+    }
+
+    function renderCameraControlSelect(keepSelection) {
+        var select = document.getElementById('camCtrlSelect');
+        if (!select) return;
+        var old = keepSelection ? (camCtrlState.currentSlot || select.value) : '';
+        select.innerHTML = '';
+        var slots = (camCtrlState.controls && camCtrlState.controls.slots) || {};
+        var connected = [];
+        ['left','right','head'].forEach(function(slot) {
+            var info = slots[slot] || {};
+            if (info.connected) connected.push({ slot: slot, info: info });
+        });
+        if (connected.length === 0) {
+            select.appendChild(new Option('未检测到相机', ''));
+            camCtrlState.currentSlot = '';
+            return;
+        }
+        connected.forEach(function(item) {
+            var label = cameraSlotLabel(backendSlotToDisplayPos(item.slot)) + ' · ' + deviceTypeLabel(item.info.type) + ' · ' + (item.info.serial || item.info.name || item.slot);
+            select.appendChild(new Option(label, item.slot));
+        });
+        var exists = connected.some(function(item) { return item.slot === old; });
+        camCtrlState.currentSlot = exists ? old : connected[0].slot;
+        select.value = camCtrlState.currentSlot;
+    }
+
+    function getCameraControlInfo() {
+        var slots = (camCtrlState.controls && camCtrlState.controls.slots) || {};
+        return slots[camCtrlState.currentSlot] || null;
+    }
+
+    function renderCameraControlFields() {
+        var info = getCameraControlInfo();
+        var detail = document.getElementById('camCtrlDeviceInfo');
+        var title = document.getElementById('camCtrlPreviewTitle');
+        var tag = document.getElementById('camCtrlPreviewTag');
+        var hwCard = document.getElementById('camCtrlHardwareCard');
+        if (!info || !camCtrlState.currentSlot) {
+            if (detail) detail.textContent = '未选择相机';
+            if (title) title.textContent = '相机预览';
+            if (tag) tag.textContent = 'Color';
+            if (hwCard) hwCard.classList.add('disabled');
+            return;
+        }
+        if (detail) {
+            detail.innerHTML = '<strong>' + escapeHtml(cameraSlotLabel(backendSlotToDisplayPos(camCtrlState.currentSlot))) + '</strong><br>'
+                + escapeHtml(deviceTypeLabel(info.type) + ' · ' + (info.name || '--')) + '<br>'
+                + '序列号：' + escapeHtml(info.serial || '--') + '<br>'
+                + (info.hardwareControls ? '支持 SDK 硬件调参' : '使用软件画面调整');
+        }
+        if (title) title.textContent = cameraSlotLabel(backendSlotToDisplayPos(camCtrlState.currentSlot)) + ' 实时画面';
+        if (tag) tag.textContent = info.hardwareControls ? 'SDK + Software' : 'Software';
+        if (hwCard) hwCard.classList.toggle('disabled', !info.hardwareControls);
+        var p = info.params || {};
+        setCameraInput('camBrightness', p.brightness, 8);
+        setCameraInput('camContrast', p.contrast, 1.05);
+        setCameraInput('camGamma', p.gamma, 1);
+        setCameraInput('camSaturation', p.saturation, 1);
+        setCameraInput('camSharpness', p.sharpness, 1);
+        setCameraInput('camDenoise', p.denoise, 1.2);
+        setCameraInput('camExposureTime', p.exposureTime, 15000);
+        setCameraInput('camExposureUpper', p.exposureUpper, 25000);
+        setCameraInput('camGain', p.gain, 3);
+        setCameraChecked('camExposureAuto', p.exposureAuto === true);
+        setCameraChecked('camGainAuto', p.gainAuto === true);
+        setCameraChecked('camGammaEnable', p.gammaEnable !== false);
+        setCameraChecked('camWhiteAuto', p.balanceWhiteAuto !== false);
+        updateCameraControlLabels();
+    }
+
+    function setCameraInput(id, value, fallback) {
+        var el = document.getElementById(id);
+        if (el) el.value = (typeof value === 'number' && isFinite(value)) ? value : fallback;
+    }
+
+    function setCameraChecked(id, checked) {
+        var el = document.getElementById(id);
+        if (el) el.checked = !!checked;
+    }
+
+    function numInput(id, fallback) {
+        var el = document.getElementById(id);
+        if (!el) return fallback;
+        var v = parseFloat(el.value);
+        return isFinite(v) ? v : fallback;
+    }
+
+    function checkedInput(id) {
+        var el = document.getElementById(id);
+        return !!(el && el.checked);
+    }
+
+    function cameraControlPayload() {
+        return {
+            brightness: numInput('camBrightness', 0),
+            contrast: numInput('camContrast', 1),
+            gamma: numInput('camGamma', 1),
+            saturation: numInput('camSaturation', 1),
+            sharpness: numInput('camSharpness', 0),
+            denoise: numInput('camDenoise', 0),
+            exposureAuto: checkedInput('camExposureAuto') ? 1 : 0,
+            exposureTime: numInput('camExposureTime', 15000),
+            exposureUpper: numInput('camExposureUpper', 25000),
+            gainAuto: checkedInput('camGainAuto') ? 1 : 0,
+            gain: numInput('camGain', 3),
+            gammaEnable: checkedInput('camGammaEnable') ? 1 : 0,
+            balanceWhiteAuto: checkedInput('camWhiteAuto') ? 1 : 0
+        };
+    }
+
+    function updateCameraControlLabels() {
+        setText('camBrightnessVal', Math.round(numInput('camBrightness', 0)).toString());
+        setText('camContrastVal', numInput('camContrast', 1).toFixed(2));
+        setText('camGammaVal', numInput('camGamma', 1).toFixed(2));
+        setText('camSaturationVal', numInput('camSaturation', 1).toFixed(2));
+        setText('camSharpnessVal', numInput('camSharpness', 0).toFixed(2));
+        setText('camDenoiseVal', numInput('camDenoise', 0).toFixed(2));
+        setText('camExposureTimeVal', Math.round(numInput('camExposureTime', 8000)) + ' us');
+        setText('camExposureUpperVal', Math.round(numInput('camExposureUpper', 16000)) + ' us');
+        setText('camGainVal', numInput('camGain', 8).toFixed(1) + ' dB');
+    }
+
+    function setText(id, text) {
+        var el = document.getElementById(id);
+        if (el) el.textContent = text;
+    }
+
+    function scheduleCameraControlApply(delay) {
+        if (camCtrlState.applyTimer) clearTimeout(camCtrlState.applyTimer);
+        camCtrlState.applyTimer = setTimeout(applyCameraControlsNow, delay);
+    }
+
+    function applyCameraControlsNow() {
+        if (!camCtrlState.currentSlot) return;
+        var status = document.getElementById('camCtrlApplyStatus');
+        if (status) status.textContent = '正在应用参数...';
+        fetch('/api/camera-controls/' + camCtrlState.currentSlot, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(cameraControlPayload())
+        }).then(function(r) { return r.json(); }).then(function(data) {
+            if (data && data.slots) camCtrlState.controls = data;
+            var info = getCameraControlInfo();
+            if (status) {
+                status.textContent = info && info.hardwareControls
+                    ? (data.hardwareApplied ? 'SDK 参数和软件参数已应用' : '软件参数已应用，部分 SDK 参数可能不支持')
+                    : '软件画面参数已应用';
+            }
+        }).catch(function() {
+            if (status) status.textContent = '参数应用失败';
+        });
+    }
+
+    function applyCameraPreset(name) {
+        var presets = {
+            normal: { brightness: 8, contrast: 1.05, gamma: 1, saturation: 1, sharpness: 1, denoise: 1.2, exposureUpper: 25000, gain: 3 },
+            bright: { brightness: 14, contrast: 1.08, gamma: 1.15, saturation: 1.04, sharpness: 1.2, denoise: 1.5, exposureUpper: 30000, gain: 4 },
+            sharp: { brightness: 6, contrast: 1.12, gamma: 1, saturation: 1.03, sharpness: 2.2, denoise: 0.8, exposureUpper: 20000, gain: 3 },
+            soft: { brightness: 8, contrast: 1.02, gamma: 1.05, saturation: 0.98, sharpness: 0.5, denoise: 2.5, exposureUpper: 25000, gain: 2.5 }
+        };
+        var p = presets[name] || presets.normal;
+        Object.keys(p).forEach(function(k) {
+            var idMap = { brightness:'camBrightness', contrast:'camContrast', gamma:'camGamma', saturation:'camSaturation', sharpness:'camSharpness', denoise:'camDenoise', exposureUpper:'camExposureUpper', gain:'camGain' };
+            var el = document.getElementById(idMap[k]);
+            if (el) el.value = p[k];
+        });
+        updateCameraControlLabels();
+    }
+
+    function startCameraControlPreview() {
+        var slot = camCtrlState.currentSlot;
+        var img = document.getElementById('camCtrlPreviewImg');
+        var frame = img ? img.closest('.camera-preview-frame') : null;
+        if (!slot || !img) {
+            if (frame) frame.classList.remove('active');
+            return;
+        }
+        if (camCtrlState.previewSlot && camCtrlState.previewSlot !== slot) {
+            fetch('/api/control?stream=' + camCtrlState.previewSlot + '-color&action=off').catch(function(){});
+        }
+        camCtrlState.previewSlot = slot;
+        fetch('/api/control?stream=' + slot + '-color&action=on').catch(function(){});
+        img.src = '/stream/' + slot + '/color?t=' + Date.now();
+        img.onload = function() { if (frame) frame.classList.add('active'); };
+        // 预览帧率：MJPEG <img> 的 onload 不会每帧触发，无法用来计帧；
+        // 这里直接用后端 /api/fps 的真实采集/预览帧率（currentSlot 为后端真实槽位）。
+        if (!camCtrlState.fpsTimer) {
+            camCtrlState.fpsTimer = setInterval(function() {
+                var fpsEl = document.getElementById('camCtrlPreviewFps');
+                var cslot = camCtrlState.currentSlot;
+                if (!fpsEl) return;
+                if (!cslot) { fpsEl.textContent = '-- fps'; return; }
+                fetch('/api/fps').then(function(r) { return r.json(); }).then(function(d) {
+                    var cap = (d.capture || {})[cslot + '-color'];
+                    var prv = (d.preview || {})[cslot + '-color'];
+                    var v = (typeof cap === 'number' && cap > 0) ? cap : prv;
+                    fpsEl.textContent = (typeof v === 'number' && v > 0) ? v.toFixed(1) + ' fps' : '-- fps';
+                }).catch(function(){});
+            }, 1000);
+        }
+    }
+
+    function stopCameraControlPreview() {
+        if (camCtrlState.previewSlot) {
+            fetch('/api/control?stream=' + camCtrlState.previewSlot + '-color&action=off').catch(function(){});
+            camCtrlState.previewSlot = '';
+        }
+        if (camCtrlState.fpsTimer) { clearInterval(camCtrlState.fpsTimer); camCtrlState.fpsTimer = null; }
+        camCtrlState.frameCount = 0;
+        var fpsEl = document.getElementById('camCtrlPreviewFps');
+        if (fpsEl) fpsEl.textContent = '-- fps';
+        var img = document.getElementById('camCtrlPreviewImg');
+        var frame = img ? img.closest('.camera-preview-frame') : null;
+        if (img) img.removeAttribute('src');
+        if (frame) frame.classList.remove('active');
+    }
 
     // ---- 电动夹爪控制页 ----
     var egPollTimer = null;
@@ -3221,16 +3594,18 @@
         var manualMax = numberValue('teleopManualMax', 1);
         var electricOpen = Math.max(0, Math.min(EG_MAX_POSITION_DEG, numberValue('teleopElectricOpen', 0)));
         var electricClose = Math.max(0, Math.min(EG_MAX_POSITION_DEG, numberValue('teleopElectricClose', EG_MAX_POSITION_DEG)));
-        var intervalMs = Math.max(40, Math.min(500, numberValue('teleopIntervalInput', 80)));
-        var deadbandDeg = Math.max(0, Math.min(300, numberValue('teleopDeadbandInput', 20)));
+        var intervalMs = Math.max(40, Math.min(500, numberValue('teleopIntervalInput', 50)));
+        var deadbandDeg = Math.max(0, Math.min(300, numberValue('teleopDeadbandInput', 10)));
+        var acceleration = Math.max(1, Math.min(600, numberValue('teleopAccelerationInput', 300)));
         var invert = !!(document.getElementById('teleopInvertToggle') && document.getElementById('teleopInvertToggle').checked);
         return {
             manualMin: manualMin,
             manualMax: manualMax,
             electricOpen: electricOpen,
             electricClose: electricClose,
-            speed: clampSpd(numberValue('teleopSpeedInput', 3000)),
+            speed: clampSpd(numberValue('teleopSpeedInput', 3276)),
             currentLimit: clampCur(numberValue('teleopCurrentInput', EG_DEFAULT_CURRENT_A)),
+            acceleration: acceleration,
             intervalMs: intervalMs,
             deadbandDeg: deadbandDeg,
             invert: invert
@@ -3247,12 +3622,22 @@
         teleopState.running = true;
         teleopState.lastTargetPosition = null;
         teleopState.lastCommandAt = 0;
+        teleopState.commandBusy = false;
         setTeleopStatus('正在同步手动夹爪到电动夹爪', true);
-        appendTeleopLog('启动遥控：手动夹爪 -> 电动夹爪');
-        sendTeleopElectricAction('enable', {}, true);
         if (teleopState.timer) clearInterval(teleopState.timer);
-        teleopState.timer = setInterval(function() { teleopTick(false); }, 40);
-        teleopTick(false);
+        teleopState.timer = null;
+        appendTeleopLog('启动遥控：速度 ' + cfg.speed + ' rpm，加速度 ' + cfg.acceleration + ' rad/s²');
+
+        // 先设置遥控专用加速度，再使能并开始跟随，避免电机沿用过低的历史加速度。
+        sendTeleopElectricAction('set_acceleration', { acceleration: cfg.acceleration }, true).then(function(result) {
+            if (!teleopState.running) return null;
+            if (!result || !result.success) appendTeleopLog('加速度设置未确认，继续使用电机当前参数');
+            return sendTeleopElectricAction('enable', {}, true);
+        }).then(function() {
+            if (!teleopState.running) return;
+            teleopState.timer = setInterval(function() { teleopTick(false); }, 40);
+            teleopTick(false);
+        });
     }
 
     function stopTeleop(sendStopCommand) {
@@ -3699,12 +4084,12 @@
     function initRpsHandsModel() {
         var statusEl = document.getElementById('rpsCameraStatus');
         if (!window.Hands) {
-            if (statusEl) statusEl.textContent = '手势模型未加载，请确认网络可访问 jsdelivr';
+            if (statusEl) statusEl.textContent = '手势模型未加载，请检查 /lib/mediapipe/ 下文件是否完整';
             return;
         }
         rpsState.hands = new Hands({
             locateFile: function(file) {
-                return 'https://cdn.jsdelivr.net/npm/@mediapipe/hands/' + file;
+                return '/lib/mediapipe/' + file;
             }
         });
         rpsState.hands.setOptions({

@@ -11,12 +11,25 @@
     "camera": {
         "fisheyeK1": -1.0,
         "fisheyeK2": 0.4,
-        "fisheyeScale": 1.5,
-        "brightness": 15,
-        "contrast": 1.1,
+        "fisheyeScale": 1.7,
+        "brightness": 8,
+        "contrast": 1.05,
+        "exposureAuto": 0,
+        "exposureTime": 15000,
+        "exposureUpper": 25000,
+        "gainAuto": 0,
+        "gain": 3,
+        "gammaEnable": 1,
+        "gamma": 1.0,
+        "sharpness": 1,
+        "denoise": 1.2,
+        "balanceWhiteAuto": 1,
         "maxWidth": 1280,
         "maxHeight": 720,
-        "fps": 30
+        "fps": 30,
+        "multiCameraMaxWidth": 1280,
+        "multiCameraMaxHeight": 720,
+        "multiCameraFps": 15
     },
     "devices": {
         "left": {

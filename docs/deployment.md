@@ -58,7 +58,7 @@ python -m pip install -r requirements.txt
 
 6. 安装硬件驱动：
 
-- 海康：MVS 客户端和驱动。
+- 海康：安装 MVS 客户端，并通过 `Driver Installation Tool` 安装 USB3 Vision 驱动。仓库内 SDK 文件不能替代系统设备驱动。
 - Orbbec：Orbbec SDK/Viewer/驱动。
 - UMI：USB 串口驱动。
 - GCAN：USBCAN 驱动。
@@ -95,6 +95,8 @@ mingw32-make -j4
 ```text
 http://localhost:8080
 ```
+
+海康相机必须先在 MVS 客户端中成功枚举和打开。测试完成后关闭 MVS，再启动本项目，避免相机被独占。如果程序显示“SDK 已加载但未枚举到相机”，优先修复 MVS 驱动或 USB 连接，而不是重复复制 SDK 文件。
 
 ## 3. Git 首次提交
 

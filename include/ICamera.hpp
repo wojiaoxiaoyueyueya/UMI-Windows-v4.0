@@ -8,6 +8,22 @@
 #include <memory>
 #include <opencv2/opencv.hpp>
 
+struct CameraControlParams {
+    double brightness = 0.0;       // 软件亮度偏移，范围建议 -100~100
+    double contrast = 1.0;         // 软件对比度倍率，范围建议 0.5~2.5
+    double gamma = 1.0;            // 软件/硬件 Gamma，范围建议 0.3~3.0
+    double saturation = 1.0;       // 软件饱和度倍率，范围建议 0~2.5
+    double sharpness = 0.0;        // 软件锐化强度，范围建议 0~5
+    double denoise = 0.0;          // 软件降噪强度，范围建议 0~10
+    bool exposureAuto = false;
+    double exposureTime = 15000.0; // 曝光时间，单位 us
+    double exposureUpper = 25000.0;
+    bool gainAuto = false;
+    double gain = 3.0;
+    bool gammaEnable = true;
+    bool balanceWhiteAuto = true;
+};
+
 class ICamera {
 public:
     virtual ~ICamera() = default;
@@ -49,6 +65,10 @@ public:
 
     // 相机内参（SLAM 用）
     virtual bool getIntrinsics(float& fx, float& fy, float& cx, float& cy) const { return false; }
+
+    // 相机硬件控制。返回 false 表示该相机没有 SDK 控制能力，仍可使用软件画面调整。
+    virtual bool setCameraControls(const CameraControlParams&) { return false; }
+    virtual bool supportsHardwareControls() const { return false; }
 
 protected:
     FrameCallback colorCb_;

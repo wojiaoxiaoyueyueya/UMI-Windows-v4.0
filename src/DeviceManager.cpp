@@ -133,13 +133,30 @@ bool DeviceManager::refreshDetectedCameras() {
 
     std::set<std::string> detectedSerials;
     for (const auto& d : detectedDevices_) {
-        if (!d.serialNumber.empty()) detectedSerials.insert(d.serialNumber);
+        if (!d.serialNumber.empty()) {
+            detectedSerials.insert(d.serialNumber);
+            cameraMissingScanCounts_.erase(d.serialNumber);
+        }
     }
     for (auto& kv : slots_) {
         auto& slot = kv.second;
         if (!slot.connected || !slot.camera) continue;
         std::string slotSerial = slot.camera->getSerialNumber();
         if (!slotSerial.empty() && detectedSerials.count(slotSerial) > 0) continue;
+
+        // USB 设备插入时，Windows 和相机 SDK 可能短暂重新枚举同一控制器上的设备。
+        // 单次漏检不能立即关闭正在采集的相机，否则奥比插入时会把海康流误判为断开。
+        int& missingScans = cameraMissingScanCounts_[slotSerial];
+        missingScans++;
+        constexpr int kMissingScansBeforeDetach = 3;
+        if (missingScans < kMissingScansBeforeDetach) {
+            if (missingScans == 1) {
+                fprintf(stderr,
+                        "[DeviceManager] %s 槽相机本轮未枚举到，暂时保留并等待确认 (SN=%s)\n",
+                        kv.first.c_str(), slotSerial.c_str());
+            }
+            continue;
+        }
 
         fprintf(stderr, "[DeviceManager] %s slot camera is no longer detected, releasing slot (SN=%s)\n",
                 kv.first.c_str(), slotSerial.c_str());
@@ -148,6 +165,7 @@ bool DeviceManager::refreshDetectedCameras() {
         retiredCameras_.push_back(std::move(slot.camera));
         slot.connected = false;
         slot.deviceType = "none";
+        cameraMissingScanCounts_.erase(slotSerial);
     }
 
     return !detectedDevices_.empty();
@@ -336,6 +354,7 @@ bool DeviceManager::refreshDetectedGrippers() {
 }
 
 bool DeviceManager::attachDetectedGrippersToEmptySlots(bool allowElectricScan) {
+    std::lock_guard<std::mutex> lock(detectedInfoMutex_);
     bool manualNeedsAttach = false;
     for (const auto& side : {std::string("left"), std::string("right")}) {
         auto it = gripperSlots_.find(side);
@@ -470,14 +489,12 @@ bool DeviceManager::attachDetectedGrippersToEmptySlots(bool allowElectricScan) {
         if (kv.second.connected && kv.second.gripper) usedPorts.insert(kv.second.gripper->getPortName());
     }
     std::vector<std::string> esp32CanPorts;
-    if (manualCandidates.empty()) {
-        for (const auto& info : portInfos) {
-            if (isManualGripperVid(info.vid)) continue;
-            if (usedPorts.count(info.portName)) continue;
-            if (isLikelyEsp32CanBridgeVid(info.vid)) esp32CanPorts.push_back(info.portName);
-        }
+    for (const auto& info : portInfos) {
+        if (isManualGripperVid(info.vid)) continue;
+        if (usedPorts.count(info.portName)) continue;
+        if (isLikelyEsp32CanBridgeVid(info.vid)) esp32CanPorts.push_back(info.portName);
     }
-    if (manualCandidates.empty() && esp32CanPorts.empty()) {
+    if (esp32CanPorts.empty()) {
         for (const auto& port : UmiGripper::scanSerialPorts()) {
             if (usedPorts.count(port)) continue;
             bool isKnownManualPort = false;
@@ -631,16 +648,33 @@ void DeviceManager::detectOrbbecDevices() {
 
 void DeviceManager::detectHikvisionDevices() {
 #ifndef NO_HIK_CAMERA
+    if (!hikSdkBannerShown_) {
+        const unsigned int version = MV_CC_GetSDKVersion();
+        fprintf(stderr, "[海康诊断] MVS SDK 已编入程序，运行库版本=0x%08X\n", version);
+        hikSdkBannerShown_ = true;
+    }
+
     // 分开枚举 GigE 和 USB，同一个物理摄像头通过两种接口可能出现两次
     // 先 GigE 再 USB，按 serial + name 双重去重
     std::set<std::string> seenSerials;
     std::set<std::string> seenNames;
+    const size_t hikCountBefore = std::count_if(
+        detectedDevices_.begin(), detectedDevices_.end(),
+        [](const DetectedDevice& d) { return d.type == "hikvision"; });
 
-    auto enumByTransport = [&](unsigned int transportType, const char* transportName) {
+    int gigERet = MV_OK;
+    int usbRet = MV_OK;
+    unsigned int gigEEnumerated = 0;
+    unsigned int usbEnumerated = 0;
+
+    auto enumByTransport = [&](unsigned int transportType, const char* transportName,
+                               int& result, unsigned int& enumerated) {
         MV_CC_DEVICE_INFO_LIST devList;
         memset(&devList, 0, sizeof(devList));
-        int ret = MV_CC_EnumDevices(transportType, &devList);
-        if (ret != MV_OK || devList.nDeviceNum == 0) return;
+        result = MV_CC_EnumDevices(transportType, &devList);
+        if (result != MV_OK) return;
+        enumerated = devList.nDeviceNum;
+        if (devList.nDeviceNum == 0) return;
 
         for (unsigned int i = 0; i < devList.nDeviceNum; i++) {
             auto* info = devList.pDeviceInfo[i];
@@ -656,12 +690,13 @@ void DeviceManager::detectHikvisionDevices() {
             }
 
             // 按 serial 或 name 去重
-            if (seenSerials.count(serial) || (!name.empty() && seenNames.count(name))) {
+            if ((!serial.empty() && seenSerials.count(serial))
+                || (!name.empty() && seenNames.count(name))) {
                 fprintf(stderr, "[DeviceManager] 跳过重复海康设备[%s]: %s (SN: %s)\n",
                         transportName, name.c_str(), serial.c_str());
                 continue;
             }
-            seenSerials.insert(serial);
+            if (!serial.empty()) seenSerials.insert(serial);
             if (!name.empty()) seenNames.insert(name);
 
             DetectedDevice dev;
@@ -676,15 +711,21 @@ void DeviceManager::detectHikvisionDevices() {
         }
     };
 
-    enumByTransport(MV_GIGE_DEVICE, "GigE");
-    enumByTransport(MV_USB_DEVICE, "USB");
+    enumByTransport(MV_GIGE_DEVICE, "GigE", gigERet, gigEEnumerated);
+    enumByTransport(MV_USB_DEVICE, "USB", usbRet, usbEnumerated);
 
-    if (detectedDevices_.empty()) {
+    size_t hikCountAfter = std::count_if(
+        detectedDevices_.begin(), detectedDevices_.end(),
+        [](const DetectedDevice& d) { return d.type == "hikvision"; });
+    int combinedRet = MV_OK;
+    unsigned int combinedEnumerated = 0;
+    if (hikCountAfter == hikCountBefore) {
         // 没有按单传输找到，尝试组合枚举
         MV_CC_DEVICE_INFO_LIST devList;
         memset(&devList, 0, sizeof(devList));
-        int ret = MV_CC_EnumDevices(MV_GIGE_DEVICE | MV_USB_DEVICE, &devList);
-        if (ret == MV_OK) {
+        combinedRet = MV_CC_EnumDevices(MV_GIGE_DEVICE | MV_USB_DEVICE, &devList);
+        if (combinedRet == MV_OK) {
+            combinedEnumerated = devList.nDeviceNum;
             for (unsigned int i = 0; i < devList.nDeviceNum; i++) {
                 auto* info = devList.pDeviceInfo[i];
                 if (!info) continue;
@@ -707,8 +748,33 @@ void DeviceManager::detectHikvisionDevices() {
             }
         }
     }
+
+    hikCountAfter = std::count_if(
+        detectedDevices_.begin(), detectedDevices_.end(),
+        [](const DetectedDevice& d) { return d.type == "hikvision"; });
+    if (hikCountAfter == hikCountBefore) {
+        if (!hikNoDeviceWarningShown_) {
+            fprintf(stderr,
+                "[海康诊断] SDK 已加载但未枚举到相机: GigE(ret=0x%08X,count=%u) "
+                "USB(ret=0x%08X,count=%u) 混合(ret=0x%08X,count=%u)\n",
+                (unsigned int)gigERet, gigEEnumerated,
+                (unsigned int)usbRet, usbEnumerated,
+                (unsigned int)combinedRet, combinedEnumerated);
+            fprintf(stderr,
+                "[海康诊断] 项目内 SDK/DLL 不能替代系统驱动。请先安装海康 MVS，"
+                "使用 Driver Installation Tool 安装 USB3 Vision 驱动，并确认 MVS 客户端能看到相机。\n");
+            hikNoDeviceWarningShown_ = true;
+        }
+    } else {
+        hikNoDeviceWarningShown_ = false;
+    }
 #else
-    fprintf(stderr, "[DeviceManager] 海康 SDK 未安装，跳过检测\n");
+    if (!hikSdkBannerShown_) {
+        fprintf(stderr,
+            "[海康诊断] 当前程序编译时未找到海康 SDK，已禁用海康相机支持。"
+            "请检查 CMake 配置输出和 lib/hikvision/lib/win64/MvCameraControl.lib。\n");
+        hikSdkBannerShown_ = true;
+    }
 #endif
 }
 
@@ -1062,9 +1128,6 @@ void DeviceManager::detectAndAssignGrippers() {
         }
     }
 
-    // 尝试电动夹爪（通过 CAN 适配器检测）
-    const bool hadManualCandidates = !candidates.empty();
-
     // 先分配手动夹爪槽位，再检测电动夹爪。
     // 新版手动夹爪可能同时暴露身份串口和数据串口；如果先扫描电动夹爪，
     // 数据串口容易被误判为 ESP32-CAN 候选，导致启动慢或槽位没有及时分配。
@@ -1111,12 +1174,10 @@ void DeviceManager::detectAndAssignGrippers() {
 
     std::set<std::string> usedPorts;
     std::vector<std::string> esp32CanPorts;
-    if (!hadManualCandidates) {
-        for (const auto& info : portInfos) {
-            if (isManualGripperVid(info.vid)) continue;
-            if (usedPorts.count(info.portName)) continue;
-            if (isLikelyEsp32CanBridgeVid(info.vid)) esp32CanPorts.push_back(info.portName);
-        }
+    for (const auto& info : portInfos) {
+        if (isManualGripperVid(info.vid)) continue;
+        if (usedPorts.count(info.portName)) continue;
+        if (isLikelyEsp32CanBridgeVid(info.vid)) esp32CanPorts.push_back(info.portName);
     }
 
     // 尝试加载 CAN SDK 并检测电动夹爪
@@ -1200,7 +1261,7 @@ void DeviceManager::detectAndAssignGrippers() {
             canAvailable = false;
         }
     }
-    if (!electricSlot.empty() && !gripperSlots_[electricSlot].connected && !hadManualCandidates) {
+    if (!electricSlot.empty() && !gripperSlots_[electricSlot].connected) {
         if (esp32CanPorts.empty()) {
             for (const auto& port : UmiGripper::scanSerialPorts()) {
                 if (usedPorts.count(port)) continue;

@@ -112,4 +112,7 @@ private:
     uint64_t lastCameraRefreshUs_ = 0;
     uint64_t lastGripperRefreshUs_ = 0;
     std::map<std::string, uint64_t> manualOpenRetryAfterUs_;
+    std::map<std::string, int> cameraMissingScanCounts_;
+    bool hikSdkBannerShown_ = false;
+    bool hikNoDeviceWarningShown_ = false;
 };

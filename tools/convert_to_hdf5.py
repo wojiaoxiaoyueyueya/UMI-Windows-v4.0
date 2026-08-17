@@ -187,6 +187,8 @@ def convert_slot(session_id, fps, start_us, source_dir, output_dir, slot_meta, p
     frame_counts = (slot_meta or {}).get('frameCount', {})
     imu_count = (slot_meta or {}).get('imuCount', 0)
     gripper_count = (slot_meta or {}).get('gripperCount', 0)
+    gripper_meta = (slot_meta or {}).get('gripper', {}) or {}
+    electric_gripper_count = gripper_meta.get('electricFrames', 0)
     pc_count = (slot_meta or {}).get('pointCloudCount', 0)
 
     # 判断夹爪 CSV 路径：新格式为 gripper.csv，旧格式为 gripper_data.csv。
@@ -198,7 +200,7 @@ def convert_slot(session_id, fps, start_us, source_dir, output_dir, slot_meta, p
         gripper_csv = gripper_csv_old
 
     has_imu = imu_count > 0 and os.path.exists(os.path.join(source_dir, 'imu_data', 'imu_data.csv'))
-    has_gripper = gripper_count > 0 and os.path.exists(gripper_csv)
+    has_gripper = (gripper_count > 0 or electric_gripper_count > 0) and os.path.exists(gripper_csv)
     pose_path = os.path.join(source_dir, 'pose_data', 'pose_data.csv')
     has_pose = os.path.exists(pose_path) and ((slot_meta or {}).get('pose', {}).get('frames', 0) > 0)
 
@@ -252,12 +254,14 @@ def convert_slot(session_id, fps, start_us, source_dir, output_dir, slot_meta, p
     pose_states = align_pose(pose_rows, video_timestamps, device_offset_us, nframes, fps) if has_pose else np.zeros((nframes, 7), dtype=np.float32)
 
     # 构建 observation.state，将夹爪和可选位姿合并为状态向量。
-    state_parts = [imu_states]
+    state_parts = []
+    if has_imu:
+        state_parts.append(imu_states)
     if has_gripper:
         state_parts.append(gripper_states)
     if has_pose:
         state_parts.append(pose_states)
-    obs_state = np.hstack(state_parts)
+    obs_state = np.hstack(state_parts) if state_parts else np.zeros((nframes, 0), dtype=np.float32)
 
     action = np.zeros((nframes, 7), dtype=np.float32)
     timestamps = np.array([ts / 1_000_000.0 for ts in video_timestamps], dtype=np.float64)
@@ -311,6 +315,7 @@ def convert_slot(session_id, fps, start_us, source_dir, output_dir, slot_meta, p
         'actionDim': 7,
         'hasIMU': has_imu,
         'hasGripper': has_gripper,
+        'gripperType': 'electric' if has_gripper and is_electric_gripper else ('manual' if has_gripper else 'none'),
         'hasPose': has_pose,
         'videos': {vtype: {'width': video_info[vtype]['width'], 'height': video_info[vtype]['height'],
                            'frames': video_info[vtype]['frames'], 'file': video_info[vtype]['file']}

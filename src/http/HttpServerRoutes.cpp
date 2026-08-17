@@ -955,6 +955,9 @@ void HttpServer::setupRoutes() {
         else if (path.find(".js") != std::string::npos) contentType = "application/javascript; charset=utf-8";
         else if (path.find(".png") != std::string::npos) contentType = "image/png";
         else if (path.find(".jpg") != std::string::npos || path.find(".jpeg") != std::string::npos) contentType = "image/jpeg";
+        else if (path.find(".wasm") != std::string::npos) contentType = "application/wasm";
+        else if (path.find(".data") != std::string::npos) contentType = "application/octet-stream";
+        else if (path.find(".tflite") != std::string::npos) contentType = "application/octet-stream";
 
         res.set_header("Cache-Control", "no-cache, no-store, must-revalidate");
         res.set_header("Pragma", "no-cache");
@@ -977,6 +980,96 @@ void HttpServer::setupMultiCameraRoutes() {
             json = "{\"devices\":[],\"slots\":{\"left\":{\"type\":\"none\",\"connected\":false},\"right\":{\"type\":\"none\",\"connected\":false},\"head\":{\"type\":\"none\",\"connected\":false}},\"grippers\":[],\"gripperSlots\":{\"left\":{\"type\":\"none\",\"connected\":false},\"right\":{\"type\":\"none\",\"connected\":false},\"extra\":{\"type\":\"none\",\"connected\":false}}}";
         }
         json::sendJson(res, json);
+    });
+
+    auto cameraControlsToJson = [this]() -> std::string {
+        std::string out = "{\"slots\":{";
+        bool first = true;
+        for (const auto& slot : {std::string("left"), std::string("right"), std::string("head")}) {
+            if (!first) out += ",";
+            first = false;
+            CameraControlParams p = getCameraControlParams(slot);
+            bool connected = false;
+            bool hardware = false;
+            std::string type = "none";
+            std::string name = "";
+            std::string serial = "";
+            if (deviceManager_) {
+                auto* s = deviceManager_->getSlot(slot);
+                if (s && s->connected && s->camera) {
+                    connected = true;
+                    type = s->camera->getDeviceType();
+                    name = s->camera->getDeviceName();
+                    serial = s->camera->getSerialNumber();
+                    hardware = s->camera->supportsHardwareControls();
+                }
+            }
+            out += "\"" + slot + "\":{";
+            out += "\"connected\":" + std::string(connected ? "true" : "false");
+            out += ",\"type\":\"" + json::escape(type) + "\"";
+            out += ",\"name\":\"" + json::escape(name) + "\"";
+            out += ",\"serial\":\"" + json::escape(serial) + "\"";
+            out += ",\"hardwareControls\":" + std::string(hardware ? "true" : "false");
+            out += ",\"params\":{";
+            out += "\"brightness\":" + std::to_string(p.brightness);
+            out += ",\"contrast\":" + std::to_string(p.contrast);
+            out += ",\"gamma\":" + std::to_string(p.gamma);
+            out += ",\"saturation\":" + std::to_string(p.saturation);
+            out += ",\"sharpness\":" + std::to_string(p.sharpness);
+            out += ",\"denoise\":" + std::to_string(p.denoise);
+            out += ",\"exposureAuto\":" + std::string(p.exposureAuto ? "true" : "false");
+            out += ",\"exposureTime\":" + std::to_string(p.exposureTime);
+            out += ",\"exposureUpper\":" + std::to_string(p.exposureUpper);
+            out += ",\"gainAuto\":" + std::string(p.gainAuto ? "true" : "false");
+            out += ",\"gain\":" + std::to_string(p.gain);
+            out += ",\"gammaEnable\":" + std::string(p.gammaEnable ? "true" : "false");
+            out += ",\"balanceWhiteAuto\":" + std::string(p.balanceWhiteAuto ? "true" : "false");
+            out += "}}";
+        }
+        out += "}}";
+        return out;
+    };
+
+    svr_->Get("/api/camera-controls", [cameraControlsToJson](const httplib::Request&, httplib::Response& res) {
+        json::sendJson(res, cameraControlsToJson());
+    });
+
+    svr_->Post("/api/camera-controls/:slot", [this, cameraControlsToJson](const httplib::Request& req, httplib::Response& res) {
+        std::string slot = req.path_params.at("slot");
+        if (slot != "left" && slot != "right" && slot != "head") {
+            json::sendJson(res, "{\"success\":false,\"error\":\"invalid camera slot\"}");
+            return;
+        }
+        CameraControlParams p = getCameraControlParams(slot);
+        p.brightness = json::extractFloat(req.body, "brightness", (float)p.brightness);
+        p.contrast = json::extractFloat(req.body, "contrast", (float)p.contrast);
+        p.gamma = json::extractFloat(req.body, "gamma", (float)p.gamma);
+        p.saturation = json::extractFloat(req.body, "saturation", (float)p.saturation);
+        p.sharpness = json::extractFloat(req.body, "sharpness", (float)p.sharpness);
+        p.denoise = json::extractFloat(req.body, "denoise", (float)p.denoise);
+        p.exposureAuto = json::extractInt(req.body, "exposureAuto", p.exposureAuto ? 1 : 0) != 0;
+        p.exposureTime = json::extractFloat(req.body, "exposureTime", (float)p.exposureTime);
+        p.exposureUpper = json::extractFloat(req.body, "exposureUpper", (float)p.exposureUpper);
+        p.gainAuto = json::extractInt(req.body, "gainAuto", p.gainAuto ? 1 : 0) != 0;
+        p.gain = json::extractFloat(req.body, "gain", (float)p.gain);
+        p.gammaEnable = json::extractInt(req.body, "gammaEnable", p.gammaEnable ? 1 : 0) != 0;
+        p.balanceWhiteAuto = json::extractInt(req.body, "balanceWhiteAuto", p.balanceWhiteAuto ? 1 : 0) != 0;
+
+        p.brightness = std::max(-100.0, std::min(100.0, p.brightness));
+        p.contrast = std::max(0.2, std::min(3.0, p.contrast));
+        p.gamma = std::max(0.2, std::min(4.0, p.gamma));
+        p.saturation = std::max(0.0, std::min(3.0, p.saturation));
+        p.sharpness = std::max(0.0, std::min(8.0, p.sharpness));
+        p.denoise = std::max(0.0, std::min(10.0, p.denoise));
+        p.exposureTime = std::max(10.0, std::min(1000000.0, p.exposureTime));
+        p.exposureUpper = std::max(10.0, std::min(1000000.0, p.exposureUpper));
+        p.gain = std::max(0.0, std::min(48.0, p.gain));
+
+        bool hardwareOk = setCameraControlParams(slot, p, true);
+        std::string result = cameraControlsToJson();
+        result.pop_back();
+        result += ",\"success\":true,\"hardwareApplied\":" + std::string(hardwareOk ? "true" : "false") + "}";
+        json::sendJson(res, result);
     });
 
     // 设备重扫描：只刷新检测列表，不强制关闭或重建当前正在采集的设备对象。
