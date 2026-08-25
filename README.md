@@ -16,11 +16,11 @@ UMI 数据采集系统用于机器人操作数据采集、设备控制、会话�
 
 ## 三个版本
 
-| 目录 | 定位 | 适用对象 | 维护状态 |
+| 目录 | 当前版本 | 定位 | 维护状态 |
 | --- | --- | --- | --- |
-| [`UMI-Windows-V4`](UMI-Windows-V4/) | 当前 Windows 主版本，使用 UMI V4.0 手动夹爪协议 | 新设备、日常采集、交付部署 | 主动维护 |
-| [`UMI-Windows-Legacy`](UMI-Windows-Legacy/) | Windows 旧手动夹爪协议版本 | 尚未淘汰的旧夹爪 | 兼容归档 |
-| [`UMI-Linux-Legacy`](UMI-Linux-Legacy/) | Ubuntu 22.04 移植版本 | Linux 环境验证和二次开发 | 兼容归档 |
+| [`UMI-Windows-V4`](UMI-Windows-V4/) | `4.2.0` | 当前 Windows 主版本，使用 UMI V4.0 手动夹爪协议 | 主动维护 |
+| [`UMI-Windows-Legacy`](UMI-Windows-Legacy/) | `3.0.0` | Windows 旧手动夹爪协议版本 | 兼容归档 |
+| [`UMI-Linux-Legacy`](UMI-Linux-Legacy/) | `1.0.0` | Ubuntu 22.04 移植版本 | 兼容归档 |
 
 ## 当前 V4 能力
 
@@ -39,9 +39,12 @@ UMI 数据采集系统用于机器人操作数据采集、设备控制、会话�
 - 普通用户：从 [Releases](https://github.com/wojiaoxiaoyueyueya/UMI-Windows-v4.0/releases/latest) 下载最新版 Windows 安装包。
 - 完整配置和操作：阅读 [V4 使用与部署手册](UMI-Windows-V4/docs/USER_GUIDE.md)。
 - 版本演进：阅读 [CHANGELOG.md](CHANGELOG.md)。
+- 旧版源码核对结果：阅读 [LEGACY_SOURCE_AUDIT.md](LEGACY_SOURCE_AUDIT.md)。
 
 ## 目录原则
 
 三套版本相互独立，不共享构建目录或硬件驱动实现。请在目标版本目录内编译和运行，不要把旧版源码复制进 V4。采集数据、转换结果、日志和本机构建产物均由 `.gitignore` 排除，不会上传到 GitHub。
+
+旧版完整 Git 历史同时保存在 `archive/windows-legacy-history` 和 `archive/linux-legacy-history` 分支。目录版本用于直接使用，归档分支用于追溯原始提交。
 
 > 第三方 SDK 和驱动的著作权、许可及再分发条件归各厂商所有。公开分发或商业交付前应再次核对对应许可。
