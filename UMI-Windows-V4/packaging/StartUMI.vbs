@@ -19,7 +19,7 @@ If Not fileSystem.FileExists(executable) Or _
    Not fileSystem.FileExists(configFile) Then
     MsgBox "Application files are incomplete. The backend, frontend, or configuration file is missing." & vbCrLf & vbCrLf & _
            "Install directory:" & vbCrLf & appRoot & vbCrLf & vbCrLf & _
-           "Please install version 4.2.0 or later again.", 16, "UMI Data Capture Platform"
+           "Please reinstall the current release package.", 16, "UMI Data Capture Platform"
     WScript.Quit 1
 End If
 

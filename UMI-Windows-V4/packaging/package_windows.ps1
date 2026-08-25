@@ -9,10 +9,14 @@ param(
 $ErrorActionPreference = "Stop"
 
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$versionFile = Join-Path $projectRoot "VERSION"
+if (-not [System.IO.File]::Exists($versionFile)) { throw "Missing VERSION file: $versionFile" }
+$projectVersion = [System.IO.File]::ReadAllText($versionFile).Trim()
+if ([string]::IsNullOrWhiteSpace($projectVersion)) { throw "VERSION file is empty: $versionFile" }
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    $versionFile = Join-Path $projectRoot "VERSION"
-    if (-not [System.IO.File]::Exists($versionFile)) { throw "Missing VERSION file: $versionFile" }
-    $Version = [System.IO.File]::ReadAllText($versionFile).Trim()
+    $Version = $projectVersion
+} elseif ($Version -ne $projectVersion) {
+    throw "Installer version '$Version' does not match project VERSION '$projectVersion'"
 }
 if ([string]::IsNullOrWhiteSpace($BuildDir)) {
     $BuildDir = Join-Path $projectRoot "build"
