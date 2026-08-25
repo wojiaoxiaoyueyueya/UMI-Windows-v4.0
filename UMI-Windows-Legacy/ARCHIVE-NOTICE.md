@@ -9,4 +9,3 @@
 - 新功能和常规缺陷修复只进入 V4 主版本。
 - 需要旧协议时，请在本目录内按原 `README.md` 操作。
 - 原始 Git 历史保存在总仓库的 `archive/windows-legacy-history` 分支。
-- 详细核对结果见总仓库根目录的 `LEGACY_SOURCE_AUDIT.md`。

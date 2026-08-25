@@ -39,7 +39,6 @@ UMI 数据采集系统用于机器人操作数据采集、设备控制、会话�
 - 普通用户：从 [Releases](https://github.com/wojiaoxiaoyueyueya/UMI-Windows-v4.0/releases/latest) 下载最新版 Windows 安装包。
 - 完整配置和操作：阅读 [V4 使用与部署手册](UMI-Windows-V4/docs/USER_GUIDE.md)。
 - 版本演进：阅读 [CHANGELOG.md](CHANGELOG.md)。
-- 旧版源码核对结果：阅读 [LEGACY_SOURCE_AUDIT.md](LEGACY_SOURCE_AUDIT.md)。
 
 ## 目录原则
 

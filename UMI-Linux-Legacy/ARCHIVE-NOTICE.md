@@ -8,4 +8,3 @@
 - 此版本不与 Windows V4 共用构建目录或设备驱动。
 - 使用前请阅读本目录的 `START_HERE.md` 和 `README.md`。
 - 原始 Git 历史保存在总仓库的 `archive/linux-legacy-history` 分支。
-- 详细核对结果见总仓库根目录的 `LEGACY_SOURCE_AUDIT.md`。
