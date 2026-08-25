@@ -35,13 +35,13 @@
 
 | 路径 | 职责 |
 | --- | --- |
-| `frontend/index.html` | 数据看板入口。 |
+| `frontend/index.html` | 采集控制台和默认入口。 |
+| `frontend/dashboard.html` | 数据看板入口。 |
 | `frontend/dashboard.js` | 数据看板逻辑，读取历史会话、转换结果、删除数据。 |
 | `frontend/dashboard.css` | 数据看板样式。 |
-| `frontend/index_old.html` | 采集控制台入口。 |
 | `frontend/script.js` | 采集控制台逻辑，包括设备状态、视频流、录制、转换、夹爪控制、剪刀石头布。 |
 | `frontend/style.css` | 采集控制台样式。 |
-| `frontend/info.html` | 项目说明和部署手册页面。 |
+| `frontend/info.html` | 当前版本和项目简介页面。 |
 
 ## 工具脚本
 
@@ -51,7 +51,6 @@
 | `tools/convert_to_hdf5.py` | 原始会话转换为 HDF5 数据集。 |
 | `tools/convert_to_rlds.py` | 原始会话转换为 RLDS/TFRecord 风格数据。 |
 | `collect_dlls.ps1` | 构建后补充收集运行 DLL。 |
-| `setup_orbbec_sdk.ps1` | Orbbec SDK 放置辅助脚本。 |
 
 ## 第三方依赖目录
 
@@ -60,7 +59,7 @@
 | `lib/hikvision/` | 海康 MVS SDK 头文件、库和运行 DLL。 |
 | `lib/orbbec/` | Orbbec SDK 头文件、库和运行 DLL。 |
 | `lib/gcan/` | GCAN USBCAN 头文件和 DLL；ESP32-CAN 方式不依赖这里的 DLL，但需要可用的 USB 串口驱动。 |
-| `lib/umi/` | UMI 夹爪驱动源码或兼容接口。 |
+| `lib/serial/` | 手动夹爪和 ESP32 串口桥所需的 USB 串口驱动。 |
 
 ## 数据目录
 

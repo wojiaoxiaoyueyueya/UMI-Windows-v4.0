@@ -152,7 +152,7 @@ target_link_libraries(ManualGripper PRIVATE
 if(HIK_SDK_FOUND)
     add_custom_command(TARGET ManualGripper POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${HIK_SDK_PATH}/lib/win64"
+            "${HIK_SDK_PATH}/runtime/win64"
             "$<TARGET_FILE_DIR:ManualGripper>"
         COMMENT "Copying Hikvision SDK DLLs"
     )

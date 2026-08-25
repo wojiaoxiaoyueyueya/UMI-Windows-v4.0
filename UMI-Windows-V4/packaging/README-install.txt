@@ -2,7 +2,7 @@ UMI 数据采集平台 - 使用说明
 
 1. 双击桌面的“UMI 数据采集平台”即可启动。
 2. 默认安装目录为 D:\UMIDataCapturePlatform；安装器不允许选择 C 盘，没有 D 盘时请选择其他非 C 盘。
-3. 程序启动后会自动打开 Edge，也可以手动访问 http://127.0.0.1:8080/index_old.html。
+3. 程序启动后会自动打开 Edge，也可以手动访问 http://127.0.0.1:8080/。
 4. 关闭程序时，在任务管理器中结束 ManualGripper.exe，或重启电脑。
 5. 原始数据默认保存在安装目录的 data_capture 文件夹。
 6. 转换结果默认保存在安装目录的 data_converted 文件夹。

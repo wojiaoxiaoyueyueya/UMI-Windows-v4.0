@@ -1,6 +1,6 @@
 Option Explicit
 
-Const AppUrl = "http://127.0.0.1:8080/index_old.html"
+Const AppUrl = "http://127.0.0.1:8080/"
 
 Dim shell, fileSystem, appRoot, executable, launcher, logFile, pageFile, configFile
 Dim retry, statusCode
@@ -10,7 +10,7 @@ appRoot = fileSystem.GetParentFolderName(WScript.ScriptFullName)
 executable = fileSystem.BuildPath(appRoot, "build\ManualGripper.exe")
 launcher = fileSystem.BuildPath(appRoot, "StartUMI.cmd")
 logFile = fileSystem.BuildPath(appRoot, "startup.log")
-pageFile = fileSystem.BuildPath(appRoot, "frontend\index_old.html")
+pageFile = fileSystem.BuildPath(appRoot, "frontend\index.html")
 configFile = fileSystem.BuildPath(appRoot, "config.json")
 
 If Not fileSystem.FileExists(executable) Or _
@@ -19,7 +19,7 @@ If Not fileSystem.FileExists(executable) Or _
    Not fileSystem.FileExists(configFile) Then
     MsgBox "Application files are incomplete. The backend, frontend, or configuration file is missing." & vbCrLf & vbCrLf & _
            "Install directory:" & vbCrLf & appRoot & vbCrLf & vbCrLf & _
-           "Please install version 4.1.2 or later again.", 16, "UMI Data Capture Platform"
+           "Please install version 4.2.0 or later again.", 16, "UMI Data Capture Platform"
     WScript.Quit 1
 End If
 

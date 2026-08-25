@@ -1,6 +1,6 @@
 # 开发者使用与维护手册
 
-本文档面向需要编译、调试、扩展或维护 UMI Windows 数据采集平台的开发者。普通用户部署和页面操作请先阅读项目根目录的 `README.md`；迁移新电脑可同时参考 `docs/deployment.md`。
+本文档面向需要编译、调试、扩展或维护 UMI Windows 数据采集平台的开发者。普通用户部署、配置和页面操作请先阅读 `docs/USER_GUIDE.md`。
 
 ## 1. 项目概览
 
@@ -72,8 +72,8 @@ python -m pip install -r requirements.txt
 ## 3. 获取代码与完整性检查
 
 ```powershell
-git clone https://github.com/wojiaoxiaoyueyueya/UMI-Windows-v4.0.git ManualGripper
-cd ManualGripper
+git clone https://github.com/wojiaoxiaoyueyueya/UMI-Windows-v4.0.git UMI-Data-Capture-System
+cd UMI-Data-Capture-System\UMI-Windows-V4
 git status
 ```
 
@@ -156,8 +156,8 @@ $env:PATH = "C:\msys64\mingw64\bin;C:\msys64\usr\bin;" + $env:PATH
 常用入口：
 
 ```text
-http://localhost:8080/index.html      数据看板
-http://localhost:8080/index_old.html  采集与控制台
+http://localhost:8080/index.html      采集与控制台
+http://localhost:8080/dashboard.html  数据看板
 http://localhost:8080/info.html       项目说明
 ```
 

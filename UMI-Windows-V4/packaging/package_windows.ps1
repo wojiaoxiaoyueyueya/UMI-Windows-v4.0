@@ -1,6 +1,6 @@
 # Build a self-contained Windows x64 installer.
 param(
-    [string]$Version = "4.1.2",
+    [string]$Version = "",
     [string]$BuildDir = "",
     [string]$MingwBin = "C:\msys64\mingw64\bin",
     [string]$PythonVersion = "3.11.9"
@@ -9,6 +9,11 @@ param(
 $ErrorActionPreference = "Stop"
 
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $versionFile = Join-Path $projectRoot "VERSION"
+    if (-not [System.IO.File]::Exists($versionFile)) { throw "Missing VERSION file: $versionFile" }
+    $Version = [System.IO.File]::ReadAllText($versionFile).Trim()
+}
 if ([string]::IsNullOrWhiteSpace($BuildDir)) {
     $BuildDir = Join-Path $projectRoot "build"
 }
@@ -78,7 +83,6 @@ function Copy-ApplicationRuntime {
     # Only deploy DLLs here: MVS GenTL .cti producers are version-coupled to a
     # full MVS installation and can conflict with the direct camera SDK.
     foreach ($relativeDir in @(
-        "lib\hikvision\lib\win64",
         "lib\hikvision\runtime\win64",
         "lib\orbbec\lib\win64",
         "lib\gcan"
@@ -116,7 +120,7 @@ function Copy-ProjectAssets {
     foreach ($directory in @("frontend", "tools", "docs")) {
         Copy-Item -LiteralPath (Join-Path $projectRoot $directory) -Destination (Join-Path $stageRoot $directory) -Recurse
     }
-    foreach ($file in @("config.json", "requirements.txt", "README.md")) {
+    foreach ($file in @("config.json", "requirements.txt", "README.md", "CHANGELOG.md", "VERSION")) {
         Copy-Item -LiteralPath (Join-Path $projectRoot $file) -Destination (Join-Path $stageRoot $file)
     }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "StartUMI.vbs") -Destination $stageRoot
