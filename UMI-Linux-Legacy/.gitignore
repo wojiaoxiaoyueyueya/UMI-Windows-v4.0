@@ -1,0 +1,44 @@
+# 本地私有配置
+.env
+*.local
+config.local.json
+
+# 编辑器和系统临时文件
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.swp
+.DS_Store
+Thumbs.db
+
+# C/C++ 编译产物
+project/build/
+project/build-*/
+project/cmake-build-*/
+project/CMakeFiles/
+project/CMakeCache.txt
+project/ManualGripper
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.exe
+
+# 采集数据、转换数据和运行日志
+project/data_capture/
+project/data_converted/
+project/Log/
+project/**/Log/
+project/**/MvSdkLog/
+*.log
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 本地 AI/Trae 配置说明或临时文件，避免误提交密钥
+trae/

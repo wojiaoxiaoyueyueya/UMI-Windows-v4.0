@@ -1,0 +1,13 @@
+# Local/private configuration
+.env
+*.local
+config.local.json
+
+# OS/editor scratch files
+.vs/
+.idea/
+*.user
+*.suo
+*.swp
+.DS_Store
+Thumbs.db
