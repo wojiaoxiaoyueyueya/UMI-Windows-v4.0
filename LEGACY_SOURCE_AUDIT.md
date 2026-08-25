@@ -43,3 +43,15 @@ Linux 压缩包额外包含 257 个构建、日志和采集生成文件，以及
 - `archive/linux-legacy-history` 指向 Ubuntu 22.04 旧版最终提交 `6f12ec8`。
 
 因此，删除两个独立旧仓库后，源码目录和原始提交历史仍可在统一仓库中恢复。
+
+## 独立仓库处理结果
+
+2026-08-25 完成以下顺序后，两个独立旧仓库已永久删除：
+
+1. 核对桌面备份与统一仓库源码。
+2. 推送三个版本目录、更新记录和本审计报告。
+3. 推送并验证两条旧版历史归档分支。
+4. 删除 `wojiaoxiaoyueyueya/UMI-windows` 和 `wojiaoxiaoyueyueya/UMI-linux`。
+5. 通过 GitHub API 确认两个旧地址均返回 404，同时统一仓库仍可正常访问。
+
+当前唯一正式仓库为 `wojiaoxiaoyueyueya/UMI-Windows-v4.0`。
