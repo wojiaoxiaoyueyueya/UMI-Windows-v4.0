@@ -225,6 +225,16 @@ cmake --build build --config Release</div>
 │  └─ gripper_data/
 └─ metadata.json</div>
                     <p>视频目录中保存 <span class="inline-code">mp4</span> 和 <span class="inline-code">timestamps.csv</span>。夹爪目录保存 <span class="inline-code">gripper.csv</span>。转换输出位于 <span class="inline-code">data_converted/</span>。</p>
+                    <h3>训练数据要求</h3>
+                    <div class="warnbox">视频、夹爪闭合度和 IMU 是观测数据，不是机器人控制动作。LeRobot 训练转换不会再自动生成全零 <span class="inline-code">action</span>。</div>
+                    <ul>
+                        <li>转换前必须填写真实任务指令。</li>
+                        <li>源会话必须包含带统一时间戳的 <span class="inline-code">action_data/actions.csv</span>。</li>
+                        <li>动作列使用连续编号的 <span class="inline-code">action_0..action_N</span>，并保存控制器实际收到的命令。</li>
+                        <li>缺少真实动作的历史会话只能作为观测参考，不能通过补零或修改 metadata 恢复为训练数据。</li>
+                        <li>Body22 π0.5 还需要三路相机、22 维关节状态和 22 维绝对关节动作，单位与训练配置保持一致。</li>
+                        <li>HDF5 与 RLDS 当前用于观测归档，元数据标记为 <span class="inline-code">trainingReady=false</span>，不可直接训练。</li>
+                    </ul>
                     <h3>保存映射规则</h3>
                     <ul>
                         <li>摄像头保存使用当前“交换左右摄像头”后的显示映射，页面左侧显示的相机会保存到 <span class="inline-code">Left-umi/</span>。</li>

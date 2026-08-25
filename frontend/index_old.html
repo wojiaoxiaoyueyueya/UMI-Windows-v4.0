@@ -333,11 +333,20 @@
                     <label class="toggle-row" style="flex-direction:column;align-items:stretch;gap:6px;">
                         <span class="toggle-label">目标格式</span>
                         <select id="convertFormat" class="convert-input" style="padding:6px 8px;">
-                            <option value="lerobot">LeRobot v3.0</option>
-                            <option value="hdf5">HDF5 v1.0</option>
-                            <option value="rlds">RLDS v0.1</option>
+                            <option value="lerobot">LeRobot v3.0（训练校验）</option>
+                            <option value="hdf5">HDF5 v1.0（观测归档）</option>
+                            <option value="rlds">RLDS v0.1（观测归档）</option>
                         </select>
                     </label>
+                    <label class="toggle-row" style="flex-direction:column;align-items:stretch;gap:6px;">
+                        <span class="toggle-label">任务指令</span>
+                        <input type="text" id="convertTask" class="convert-input"
+                               placeholder="例如：将红色方块放入收纳盒">
+                    </label>
+                    <div class="convert-contract-note">
+                        LeRobot 训练转换只接受真实控制动作，不会用全零数据补齐。源会话需包含
+                        <span class="inline-code">action_data/actions.csv</span>。
+                    </div>
                 </div>
                 <div class="sidebar-section">
                     <button class="record-btn" id="convertBrowseBtn">浏览会话</button>

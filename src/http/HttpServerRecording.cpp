@@ -1040,6 +1040,8 @@ bool HttpServer::startConversion(const std::string& sourceDir,
             std::string srcPath = srcDir + "/" + sessions[i];
             std::string outPath = outDir + "/" + sessions[i] + "_" + format;
             std::string progressPath = outDir + "/.convert_progress.json";
+            // 删除上一次任务的进度文件，防止失败时误显示旧错误信息。
+            DeleteFileW(winfs::utf8ToWide(progressPath).c_str());
 
             // 安装版优先使用项目内置 Python；源码运行时回退到系统 Python。
             std::string bundledPython = winfs::resolvePath(frontendDir_ + "/../runtime/python/python.exe");
@@ -1064,9 +1066,16 @@ bool HttpServer::startConversion(const std::string& sourceDir,
             }
             std::lock_guard<std::mutex> lk(convertState_.mutex);
             if (ret != 0) {
-                convertState_.error = sessions[i] + " failed (code " + std::to_string(ret) + ")";
+                // Python 转换器会把可读的校验原因写入进度文件，优先展示给用户。
+                std::string detail;
+                const std::string progressJson = winfs::readFileToString(progressPath);
+                if (!progressJson.empty()) detail = json::extractStr(progressJson, "error");
+                if (detail.empty()) {
+                    detail = "转换程序退出，错误码 " + std::to_string(ret);
+                }
+                convertState_.error = sessions[i] + ": " + detail;
                 convertState_.converting = false;
-                convertState_.currentStep = "Error";
+                convertState_.currentStep = "转换失败";
                 return;
             }
             convertState_.completedSessions = i + 1;

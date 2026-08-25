@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""将原始录制会话转换为 LeRobot v3.0 数据集格式。
+"""将包含真实动作监督的原始会话转换为 LeRobot v3.0 数据集格式。
 
 用法：convert_to_lerobot.py <原始会话目录> <输出数据集目录> [--task 任务描述] [--progress 进度文件]
+
+训练转换要求每个槽位提供 action_data/actions.csv。动作文件至少包含：
+session_time_us,action_0,...,action_N。转换器不会再用全零向量伪造动作监督。
 
 依赖：pip3 install pyarrow
 """
 
-import json, os, sys, csv, shutil, math
+import json, os, sys, csv, shutil, math, re
 
 try:
     import pyarrow as pa
@@ -23,16 +26,28 @@ VIDEO_MAP = {
 }
 
 
+class ConversionError(RuntimeError):
+    """表示源数据不满足训练转换合同。"""
+
+
 def aligned_ts(row):
-    return int(row.get('session_time_us') or row['timestamp_us'])
+    """优先读取会话相对时间戳，并正确保留合法的 0 时刻。"""
+    session_ts = row.get('session_time_us')
+    if session_ts is not None and str(session_ts).strip() != '':
+        return int(float(session_ts))
+    timestamp_ts = row.get('timestamp_us')
+    if timestamp_ts is None or str(timestamp_ts).strip() == '':
+        raise ConversionError("CSV 缺少 session_time_us 或 timestamp_us 时间戳")
+    return int(float(timestamp_ts))
 
 
-def write_progress(pf, progress, step, done=False):
+def write_progress(pf, progress, step, done=False, error=""):
     if not pf:
         return
     try:
-        with open(pf, 'w') as f:
-            json.dump({"progress": progress, "step": step, "done": done}, f)
+        with open(pf, 'w', encoding='utf-8') as f:
+            json.dump({"progress": progress, "step": step, "done": done, "error": error}, f,
+                      ensure_ascii=False)
     except Exception:
         pass
 
@@ -41,7 +56,7 @@ def read_imu(path):
     rows = []
     if not os.path.exists(path):
         return rows
-    with open(path, newline='') as f:
+    with open(path, newline='', encoding='utf-8-sig') as f:
         for r in csv.DictReader(f):
             rows.append({
                 'ts': aligned_ts(r),
@@ -55,12 +70,15 @@ def read_imu(path):
 def read_gripper(path):
     rows = []
     is_electric = False
+    has_embedded_imu = False
     if not os.path.exists(path):
-        return rows, is_electric
-    with open(path, newline='') as f:
+        return rows, is_electric, has_embedded_imu
+    with open(path, newline='', encoding='utf-8-sig') as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames or []
         is_electric = 'position_deg' in headers
+        has_embedded_imu = all(name in headers for name in (
+            'accel_x', 'accel_y', 'accel_z', 'gyro_x', 'gyro_y', 'gyro_z'))
         for r in reader:
             if is_electric:
                 rows.append({
@@ -77,9 +95,95 @@ def read_gripper(path):
                 rows.append({
                     'ts': aligned_ts(r),
                     'close_ratio': close_ratio,
+                    'ax': float(r.get('accel_x') or 0),
+                    'ay': float(r.get('accel_y') or 0),
+                    'az': float(r.get('accel_z') or 0),
+                    'gx': float(r.get('gyro_x') or 0),
+                    'gy': float(r.get('gyro_y') or 0),
+                    'gz': float(r.get('gyro_z') or 0),
                 })
     rows.sort(key=lambda x: x['ts'])
-    return rows, is_electric
+    return rows, is_electric, has_embedded_imu
+
+
+def find_action_file(slot_dir):
+    """查找当前槽位的真实控制动作文件，不跨槽位复用动作。"""
+    candidates = (
+        os.path.join(slot_dir, 'action_data', 'actions.csv'),
+        os.path.join(slot_dir, 'action_data', 'action.csv'),
+    )
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return ''
+
+
+def read_actions(path):
+    """读取 action_0..action_N，并验证维度、数值和时间戳。"""
+    if not path:
+        raise ConversionError(
+            "缺少真实动作文件 action_data/actions.csv；当前会话只有观测数据，不能用于行为克隆训练")
+
+    rows = []
+    with open(path, newline='', encoding='utf-8-sig') as f:
+        reader = csv.DictReader(f)
+        headers = reader.fieldnames or []
+        indexed_columns = []
+        for name in headers:
+            match = re.fullmatch(r'action_(\d+)', name)
+            if match:
+                indexed_columns.append((int(match.group(1)), name))
+        indexed_columns.sort(key=lambda item: item[0])
+        action_columns = [name for _, name in indexed_columns]
+        if not action_columns or [index for index, _ in indexed_columns] != list(range(len(action_columns))):
+            raise ConversionError(
+                "动作文件必须包含从 action_0 开始且连续编号的动作列，例如 action_0..action_21")
+
+        for line_number, row in enumerate(reader, start=2):
+            try:
+                values = [float(row[name]) for name in action_columns]
+                timestamp = aligned_ts(row)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ConversionError(f"动作文件第 {line_number} 行无法解析: {exc}") from exc
+            if not all(math.isfinite(value) for value in values):
+                raise ConversionError(f"动作文件第 {line_number} 行包含 NaN 或无穷值")
+            if rows and timestamp < rows[-1]['ts']:
+                raise ConversionError(f"动作文件第 {line_number} 行时间戳早于上一行")
+            rows.append({'ts': timestamp, 'values': values})
+
+    if len(rows) < 2:
+        raise ConversionError("动作文件至少需要两条带时间戳的控制命令")
+
+    unique_actions = {tuple(round(value, 9) for value in row['values']) for row in rows}
+    if len(unique_actions) <= 1:
+        raise ConversionError("真实 action 全程不变，缺少可学习的动作监督，请检查采集端控制命令日志")
+    return rows, action_columns
+
+
+def align_vector_rows(rows, frame_timestamps, n, value_key):
+    """将异步传感器或动作样本按最近时间戳对齐到视频帧。"""
+    if not rows or n == 0:
+        return []
+    aligned = []
+    cursor = 0
+    for i in range(n):
+        frame_ts = frame_timestamps[min(i, len(frame_timestamps) - 1)]
+        while cursor + 1 < len(rows):
+            current_delta = abs(rows[cursor]['ts'] - frame_ts)
+            next_delta = abs(rows[cursor + 1]['ts'] - frame_ts)
+            if next_delta > current_delta:
+                break
+            cursor += 1
+        aligned.append(list(rows[cursor][value_key]))
+    return aligned
+
+
+def align_embedded_imu_to_frames(gripper_rows, video_timestamps, n):
+    imu_rows = [{
+        'ts': row['ts'],
+        'values': [row['ax'], row['ay'], row['az'], row['gx'], row['gy'], row['gz']],
+    } for row in gripper_rows]
+    return align_vector_rows(imu_rows, video_timestamps, n, 'values')
 
 
 def read_video_timestamps(source_dir, video_type):
@@ -88,7 +192,7 @@ def read_video_timestamps(source_dir, video_type):
     timestamps = []
     if not os.path.exists(ts_path):
         return timestamps
-    with open(ts_path, newline='') as f:
+    with open(ts_path, newline='', encoding='utf-8-sig') as f:
         for r in csv.DictReader(f):
             timestamps.append(aligned_ts(r))
     return timestamps
@@ -166,7 +270,7 @@ def read_pose(path):
     if not os.path.exists(path):
         return []
     rows = []
-    with open(path, newline='') as f:
+    with open(path, newline='', encoding='utf-8-sig') as f:
         for r in csv.DictReader(f):
             rows.append({
                 'ts': aligned_ts(r),
@@ -214,24 +318,36 @@ def align_pose_to_frames(pose_rows, video_timestamps, device_offset_us, n):
     return states
 
 
+def percentile(sorted_values, quantile):
+    if not sorted_values:
+        return 0.0
+    position = (len(sorted_values) - 1) * quantile
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return sorted_values[lower]
+    weight = position - lower
+    return sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight
+
+
 def compute_stats(values_list):
     if not values_list:
-        return [0.0], [0.0], [0.0], [0.0]
+        return [0.0], [0.0], [0.0], [0.0], [0.0], [0.0]
     n = len(values_list)
     dim = len(values_list[0])
-    flat = []
-    for v in values_list:
-        flat.extend(v)
     mean = [sum(values_list[i][d] for i in range(n)) / n for d in range(dim)]
     var = [sum((values_list[i][d] - mean[d]) ** 2 for i in range(n)) / n for d in range(dim)]
     std = [math.sqrt(v) for v in var]
     mn = [min(values_list[i][d] for i in range(n)) for d in range(dim)]
     mx = [max(values_list[i][d] for i in range(n)) for d in range(dim)]
-    return mean, std, mn, mx
+    q01 = [percentile(sorted(values_list[i][d] for i in range(n)), 0.01) for d in range(dim)]
+    q99 = [percentile(sorted(values_list[i][d] for i in range(n)), 0.99) for d in range(dim)]
+    return mean, std, mn, mx, q01, q99
 
 
 def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
-                 progress_file, slot_name=None, slot_meta=None):
+                 progress_file, slot_name=None, slot_meta=None,
+                 allow_observation_only=False):
     """将单个槽位转换为 LeRobot 数据集；如果是旧版扁平目录，则转换整个会话。
 
     Args:
@@ -267,7 +383,7 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
         first_video_dev_ts = 0
         device_offset_us = 0
         # 旧版格式：从顶层 metadata.json 读取。
-        with open(os.path.join(source_dir, 'metadata.json')) as f:
+        with open(os.path.join(source_dir, 'metadata.json'), encoding='utf-8-sig') as f:
             meta = json.load(f)
         first_video_dev_ts = meta.get('firstVideoDeviceTimestampUs', 0)
         device_offset_us = meta.get('deviceToSystemOffsetUs', 0)
@@ -280,7 +396,8 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
         pose_frames = meta.get('pose', {}).get('frames', 0)
 
     # --- 检测当前会话中可用的数据类型 ---
-    has_imu = imu_count > 0 and os.path.exists(os.path.join(slot_dir, 'imu_data', 'imu_data.csv'))
+    imu_path = os.path.join(slot_dir, 'imu_data', 'imu_data.csv')
+    has_standalone_imu = imu_count > 0 and os.path.exists(imu_path)
 
     # 夹爪数据：新格式使用 gripper.csv，旧格式使用 gripper_data.csv。
     gripper_path = os.path.join(slot_dir, 'gripper_data', 'gripper.csv')
@@ -295,6 +412,21 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
         has_gripper = False
         used_gripper_path = gripper_path_old
     effective_gripper_count = electric_gripper_count if electric_gripper_count > 0 else gripper_count
+
+    # 新版手动夹爪把 IMU 与闭合度保存在同一个 gripper.csv 中，不能再依赖独立 imu_data 目录。
+    gripper_rows, is_electric, has_embedded_imu = read_gripper(used_gripper_path) if has_gripper else ([], False, False)
+    has_imu = has_standalone_imu or (has_gripper and has_embedded_imu and not is_electric)
+
+    # 训练转换必须读取真实控制命令。兼容开关只供检查历史观测包，网页端不启用。
+    action_rows = []
+    action_names = []
+    action_file = find_action_file(slot_dir)
+    if action_file:
+        action_rows, action_names = read_actions(action_file)
+    elif not allow_observation_only:
+        slot_label = slot_name or os.path.basename(slot_dir)
+        raise ConversionError(
+            f"{slot_label} 缺少真实动作文件 action_data/actions.csv；禁止生成全零 action 训练包")
 
     has_pc = pc_count > 0
     pose_path = os.path.join(slot_dir, 'pose_data', 'pose_data.csv')
@@ -319,9 +451,9 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
     # 确定帧数和主视频类型。
     primary_video = None
     nframes = 0
-    state_dim = 6  # IMU accel+gyro
+    state_dim = 6 if has_imu else 0
     if has_gripper:
-        state_dim += 1  # close_ratio only (manual)
+        state_dim += 3 if is_electric else 1
     # 夹爪状态维度会在检测到电动夹爪后调整。
     if has_pose:
         state_dim += 7  # xyz + quaternion
@@ -333,7 +465,7 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
                 nframes = video_info[vtype]['frames']
                 break
     elif has_imu:
-        nframes = imu_count
+        nframes = imu_count if has_standalone_imu else len(gripper_rows)
         state_dim = 6
     elif has_pc:
         nframes = pc_count
@@ -351,17 +483,22 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
     if primary_video:
         ts_path = os.path.join(slot_dir, VIDEO_MAP[primary_video]['dir'], 'timestamps.csv')
         if os.path.exists(ts_path):
-            with open(ts_path, newline='') as f:
+            with open(ts_path, newline='', encoding='utf-8-sig') as f:
                 for r in csv.DictReader(f):
                     video_timestamps.append(aligned_ts(r))
     if not video_timestamps or len(video_timestamps) != nframes:
         # 兼容旧数据：没有 timestamps.csv 时按 FPS 生成虚拟时间戳。
         video_timestamps = [start_us + int(j * 1_000_000 / fps) for j in range(nframes)]
+    if action_rows:
+        tolerance_us = int(1_000_000 / fps) * 2
+        if (action_rows[-1]['ts'] < video_timestamps[0] - tolerance_us or
+                action_rows[0]['ts'] > video_timestamps[-1] + tolerance_us):
+            raise ConversionError("动作时间轴与视频时间轴没有重叠，请检查 session_time_us 的时钟基准")
 
     # --- 创建 LeRobot 目录结构 ---
     meta_d = os.path.join(output_dir, 'meta')
     data_d = os.path.join(output_dir, 'data', 'chunk-000')
-    ep_d = os.path.join(meta_d, 'episodes')
+    ep_d = os.path.join(meta_d, 'episodes', 'chunk-000')
     for d in (meta_d, data_d, ep_d):
         os.makedirs(d, exist_ok=True)
 
@@ -373,15 +510,19 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
 
     # --- 读取并对齐 IMU 数据 ---
     write_progress(progress_file, 0.15, "Reading IMU data...")
-    imu_rows = read_imu(os.path.join(slot_dir, 'imu_data', 'imu_data.csv'))
-    imu_states = align_imu_to_frames(imu_rows, video_timestamps, nframes) if has_imu else [[0.0] * 6 for _ in range(nframes)]
+    imu_rows = read_imu(imu_path) if has_standalone_imu else []
+    if has_standalone_imu:
+        imu_states = align_imu_to_frames(imu_rows, video_timestamps, nframes)
+    elif has_embedded_imu and gripper_rows:
+        imu_states = align_embedded_imu_to_frames(gripper_rows, video_timestamps, nframes)
+    else:
+        imu_states = [[] for _ in range(nframes)]
 
     # --- 读取并对齐夹爪数据 ---
     write_progress(progress_file, 0.20, "Reading gripper data...")
-    gripper_rows, is_electric = read_gripper(used_gripper_path)
-    if has_gripper and is_electric:
-        state_dim += 2  # electric has 3 dims vs manual 1
-    gripper_states = align_gripper_to_frames(gripper_rows, video_timestamps, device_offset_us, nframes, is_electric) if has_gripper else ([[0.0] * (3 if is_electric else 1) for _ in range(nframes)] if is_electric else [[0.0] for _ in range(nframes)])
+    gripper_states = align_gripper_to_frames(
+        gripper_rows, video_timestamps, device_offset_us, nframes, is_electric
+    ) if has_gripper else [[] for _ in range(nframes)]
 
     # --- 读取并对齐位姿数据 ---
     write_progress(progress_file, 0.22, "Reading pose data...")
@@ -394,12 +535,16 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
     else:
         states = [imu_states[i] + gripper_states[i] for i in range(nframes)]
 
-    # --- 构建 action 字段；当前没有外部动作标签时使用占位动作 ---
-    action_dim = 7
-    actions = [[0.0] * action_dim for _ in range(nframes)]
+    # --- 使用同一时间轴上的真实控制动作；不再默认填充七维全零向量 ---
+    if action_rows:
+        actions = align_vector_rows(action_rows, video_timestamps, nframes, 'values')
+        action_dim = len(action_names)
+    else:
+        action_dim = 0
+        actions = [[] for _ in range(nframes)]
 
     # --- 将微秒时间戳转换为秒，写入 LeRobot timestamp 字段 ---
-    real_ts_seconds = [ts / 1_000_000.0 for ts in video_timestamps]
+    real_ts_seconds = [frame_index / float(fps) for frame_index in range(nframes)]
 
     # --- 写入数据 Parquet 文件 ---
     write_progress(progress_file, 0.30, "Writing data Parquet...")
@@ -407,18 +552,27 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
         'episode_index':  pa.array([0] * nframes, type=pa.int64()),
         'frame_index':    pa.array(list(range(nframes)), type=pa.int64()),
         'timestamp':      pa.array(real_ts_seconds, type=pa.float32()),
-        'observation.state': pa.array(states, type=pa.list_(pa.float32())),
-        'action':         pa.array(actions, type=pa.list_(pa.float32())),
-        'next.reward':    pa.array([[0.0] for _ in range(nframes)], type=pa.list_(pa.float32())),
-        'next.done':      pa.array([[False] for _ in range(nframes)], type=pa.list_(pa.bool_())),
+        'next.reward':    pa.array([0.0] * nframes, type=pa.float32()),
+        'next.done':      pa.array([i == nframes - 1 for i in range(nframes)], type=pa.bool_()),
         'index':          pa.array(list(range(nframes)), type=pa.int64()),
         'task_index':     pa.array([0] * nframes, type=pa.int64()),
     }
+    if state_dim > 0:
+        table_data['observation.state'] = pa.array(states, type=pa.list_(pa.float32()))
+    if action_dim > 0:
+        table_data['action'] = pa.array(actions, type=pa.list_(pa.float32()))
     pq.write_table(pa.table(table_data), os.path.join(data_d, 'file-000.parquet'))
 
     # --- 计算数据集统计信息 ---
     write_progress(progress_file, 0.50, "Computing statistics...")
-    state_mean, state_std, state_min, state_max = compute_stats(states)
+    if state_dim > 0:
+        state_mean, state_std, state_min, state_max, state_q01, state_q99 = compute_stats(states)
+    else:
+        state_mean = state_std = state_min = state_max = state_q01 = state_q99 = []
+    if actions and action_dim > 0:
+        action_mean, action_std, action_min, action_max, action_q01, action_q99 = compute_stats(actions)
+    else:
+        action_mean = action_std = action_min = action_max = action_q01 = action_q99 = []
 
     ts_values = real_ts_seconds
     ts_mean = sum(ts_values) / nframes
@@ -429,23 +583,46 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
 
     done_mean = 1.0 / nframes
     done_std = math.sqrt((nframes - 1) / (nframes ** 2)) if nframes > 1 else 0.0
+    task_desc = task or f"Recorded session {session_id}"
+    if slot_name:
+        task_desc = f"{task_desc} [{slot_name}]"
 
     # --- 写入 episode 索引 Parquet 文件 ---
     write_progress(progress_file, 0.60, "Writing episodes metadata...")
-    ep_table = pa.table({
+    episode_columns = {
         'episode_index':      pa.array([0], type=pa.int64()),
-        'task_index':         pa.array([0], type=pa.int64()),
-        'file_index':         pa.array([0], type=pa.int64()),
-        'chunk_index':        pa.array([0], type=pa.int64()),
-        'episode_length':     pa.array([nframes], type=pa.int32()),
-        'episode_start_index': pa.array([0], type=pa.int64()),
-        'episode_end_index':  pa.array([nframes - 1], type=pa.int64()),
-        'video_start_index':  pa.array([0], type=pa.int64()),
-        'video_end_index':    pa.array([nframes - 1], type=pa.int64()),
-        'timestamp':          pa.array([real_ts_seconds[0]], type=pa.float64()),
-        'success':            pa.array([True], type=pa.bool_()),
-    })
-    pq.write_table(ep_table, os.path.join(ep_d, 'chunk-000.parquet'))
+        'tasks':              pa.array([[task_desc]], type=pa.list_(pa.string())),
+        'length':             pa.array([nframes], type=pa.int64()),
+        'data/chunk_index':   pa.array([0], type=pa.int64()),
+        'data/file_index':    pa.array([0], type=pa.int64()),
+        'dataset_from_index': pa.array([0], type=pa.int64()),
+        'dataset_to_index':   pa.array([nframes], type=pa.int64()),
+        'meta/episodes/chunk_index': pa.array([0], type=pa.int64()),
+        'meta/episodes/file_index':  pa.array([0], type=pa.int64()),
+    }
+    if state_dim > 0:
+        for stat_name, values in (
+            ('mean', state_mean), ('std', state_std), ('min', state_min), ('max', state_max),
+            ('q01', state_q01), ('q99', state_q99)):
+            episode_columns[f'stats/observation.state/{stat_name}'] = pa.array(
+                [values], type=pa.list_(pa.float64()))
+        episode_columns['stats/observation.state/count'] = pa.array([nframes], type=pa.int64())
+    if action_dim > 0:
+        for stat_name, values in (
+            ('mean', action_mean), ('std', action_std), ('min', action_min), ('max', action_max),
+            ('q01', action_q01), ('q99', action_q99)):
+            episode_columns[f'stats/action/{stat_name}'] = pa.array(
+                [values], type=pa.list_(pa.float64()))
+        episode_columns['stats/action/count'] = pa.array([nframes], type=pa.int64())
+    for vtype in available_videos:
+        video_key = VIDEO_MAP[vtype]['key']
+        episode_columns[f'videos/{video_key}/chunk_index'] = pa.array([0], type=pa.int64())
+        episode_columns[f'videos/{video_key}/file_index'] = pa.array([0], type=pa.int64())
+        episode_columns[f'videos/{video_key}/from_timestamp'] = pa.array([0.0], type=pa.float64())
+        episode_columns[f'videos/{video_key}/to_timestamp'] = pa.array(
+            [nframes / float(fps)], type=pa.float64())
+    ep_table = pa.table(episode_columns)
+    pq.write_table(ep_table, os.path.join(ep_d, 'file-000.parquet'))
 
     # --- 构建 LeRobot features 元数据 ---
     write_progress(progress_file, 0.75, "Writing info.json...")
@@ -466,7 +643,9 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
             },
         }
 
-    sensor_names = ['accel_x', 'accel_y', 'accel_z', 'gyro_x', 'gyro_y', 'gyro_z']
+    sensor_names = []
+    if has_imu:
+        sensor_names += ['accel_x', 'accel_y', 'accel_z', 'gyro_x', 'gyro_y', 'gyro_z']
     if has_gripper:
         if is_electric:
             sensor_names += ['position_deg', 'velocity_rpm', 'current_a']
@@ -474,74 +653,79 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
             sensor_names += ['close_ratio']
     if has_pose:
         sensor_names += ['pos_x', 'pos_y', 'pos_z', 'quat_x', 'quat_y', 'quat_z', 'quat_w']
-    features['observation.state'] = {
-        'dtype': 'float32',
-        'shape': [state_dim],
-        'names': {
-            'sensors': sensor_names[:state_dim],
-        },
-        'fps': fps,
+    if state_dim > 0:
+        features['observation.state'] = {
+            'dtype': 'float32',
+            'shape': [state_dim],
+            'names': {
+                'sensors': sensor_names[:state_dim],
+            },
+            'fps': fps,
+        }
+    if action_dim > 0:
+        features['action'] = {
+            'dtype': 'float32',
+            'shape': [action_dim],
+            'names': {'motors': action_names},
+            'fps': fps,
+        }
+    scalar_dtypes = {
+        'timestamp': 'float32',
+        'episode_index': 'int64',
+        'frame_index': 'int64',
+        'next.reward': 'float32',
+        'next.done': 'bool',
+        'index': 'int64',
+        'task_index': 'int64',
     }
-    features['action'] = {
-        'dtype': 'float32',
-        'shape': [action_dim],
-        'names': {
-            'motors': ['delta_joint_0', 'delta_joint_1', 'delta_joint_2',
-                       'delta_joint_3', 'delta_joint_4', 'delta_joint_5', 'gripper'],
-        },
-        'fps': fps,
-    }
-    for key in ('timestamp', 'episode_index', 'frame_index', 'next.reward', 'next.done', 'index', 'task_index'):
-        dtype = 'bool' if key == 'next.done' else ('float32' if key == 'timestamp' else 'int64')
+    for key, dtype in scalar_dtypes.items():
         features[key] = {'dtype': dtype, 'shape': [1], 'names': None, 'fps': fps}
 
     info = {
         'codebase_version': 'v3.0',
-        'robot_type': 'orbbec_uin_gripper',
+        'robot_type': 'umi_data_capture',
         'total_episodes': 1,
         'total_frames': nframes,
         'total_tasks': 1,
         'chunks_size': 1000,
-        'fps': fps,
+        'fps': int(round(fps)),
+        'data_files_size_in_mb': 100,
+        'video_files_size_in_mb': 500,
         'splits': {'train': '0:1'},
         'data_path': 'data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet',
         'features': features,
+        'training_ready': action_dim > 0,
     }
     if slot_name:
         info['slot'] = slot_name
     if available_videos:
         info['video_path'] = 'videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4'
-    with open(os.path.join(meta_d, 'info.json'), 'w') as f:
+    with open(os.path.join(meta_d, 'info.json'), 'w', encoding='utf-8') as f:
         json.dump(info, f, indent=2, ensure_ascii=False)
 
-    # --- 写入任务描述 tasks.jsonl ---
-    task_desc = task or f"Recorded session {session_id}"
-    if slot_name:
-        task_desc = f"{task_desc} [{slot_name}]"
-    with open(os.path.join(meta_d, 'tasks.jsonl'), 'w') as f:
-        f.write(json.dumps({'task_index': 0, 'task': task_desc}, ensure_ascii=False) + '\n')
+    # --- 使用 LeRobot v3 标准 Parquet 任务索引 ---
+    task_table = pa.table({
+        'task_index': pa.array([0], type=pa.int64()),
+        'task': pa.array([task_desc], type=pa.string()),
+    })
+    pq.write_table(task_table, os.path.join(meta_d, 'tasks.parquet'))
 
     # --- 写入统计文件 stats.json ---
     write_progress(progress_file, 0.85, "Writing stats.json...")
     stats = {}
 
-    for vtype in available_videos:
-        stats[VIDEO_MAP[vtype]['key']] = {
-            'mean': [[[0.0, 0.0, 0.0]]],
-            'std': [[[1.0, 1.0, 1.0]]],
-            'min': [[[0.0, 0.0, 0.0]]],
-            'max': [[[255.0, 255.0, 255.0]]],
-            'count': [nframes],
+    if state_dim > 0:
+        stats['observation.state'] = {
+            'mean': state_mean, 'std': state_std,
+            'min': state_min, 'max': state_max,
+            'q01': state_q01, 'q99': state_q99, 'count': [nframes],
         }
-
-    stats['observation.state'] = {
-        'mean': state_mean, 'std': state_std,
-        'min': state_min, 'max': state_max, 'count': [nframes],
-    }
-    stats['action'] = {
-        'mean': [0.0] * action_dim, 'std': [1.0] * action_dim,
-        'min': [None] * action_dim, 'max': [None] * action_dim, 'count': [nframes],
-    }
+    if action_dim > 0:
+        stats['action'] = {
+            'mean': action_mean, 'std': action_std,
+            'min': action_min, 'max': action_max,
+            'q01': action_q01, 'q99': action_q99, 'count': [nframes],
+        }
     stats['timestamp'] = {
         'mean': [ts_mean], 'std': [ts_std],
         'min': [min(ts_values)], 'max': [max(ts_values)], 'count': [nframes],
@@ -552,7 +736,7 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
     stats['next.done'] = {'mean': [done_mean], 'std': [done_std], 'min': [False], 'max': [True], 'count': [nframes]}
     stats['index'] = {'mean': [fi_mean], 'std': [fi_std], 'min': [0], 'max': [nframes - 1], 'count': [nframes]}
     stats['task_index'] = {'mean': [0.0], 'std': [0.0], 'min': [0], 'max': [0], 'count': [nframes]}
-    with open(os.path.join(meta_d, 'stats.json'), 'w') as f:
+    with open(os.path.join(meta_d, 'stats.json'), 'w', encoding='utf-8') as f:
         json.dump(stats, f, indent=2, ensure_ascii=False, allow_nan=False)
 
     write_progress(progress_file, 0.95, "Finalizing...")
@@ -565,6 +749,8 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
         'fps': fps,
         'totalFrames': nframes,
         'totalEpisodes': 1,
+        'trainingReady': action_dim > 0,
+        'actionDimension': action_dim,
         'hasIMU': has_imu,
         'hasGripper': has_gripper,
         'hasPose': has_pose,
@@ -576,13 +762,13 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
     if slot_name:
         root_meta['slot'] = slot_name
     if has_imu:
-        root_meta['imuCount'] = imu_count
+        root_meta['imuCount'] = imu_count if has_standalone_imu else len(gripper_rows)
     if has_gripper:
         root_meta['gripperCount'] = effective_gripper_count
         root_meta['gripperType'] = 'electric' if is_electric else 'manual'
     if has_pc:
         root_meta['pointCloudCount'] = pc_count
-    with open(os.path.join(output_dir, 'metadata.json'), 'w') as f:
+    with open(os.path.join(output_dir, 'metadata.json'), 'w', encoding='utf-8') as f:
         json.dump(root_meta, f, indent=2, ensure_ascii=False)
 
     # 构建转换摘要，返回给前端显示。
@@ -591,7 +777,7 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
         vi = video_info[primary_video]
         sources.append(f"{primary_video}:{vi['width']}x{vi['height']}")
     if has_imu:
-        sources.append(f"imu:{imu_count}")
+        sources.append(f"imu:{imu_count if has_standalone_imu else len(gripper_rows)}")
     if has_gripper:
         sources.append(f"gripper:{effective_gripper_count}")
     if has_pc:
@@ -611,6 +797,7 @@ def main():
     output_dir = args[1]
     task = ""
     progress_file = ""
+    allow_observation_only = False
 
     i = 2
     while i < len(args):
@@ -618,46 +805,88 @@ def main():
             task = args[i + 1]; i += 2
         elif args[i] == '--progress' and i + 1 < len(args):
             progress_file = args[i + 1]; i += 2
+        elif args[i] == '--allow-observation-only':
+            allow_observation_only = True; i += 1
         else:
             i += 1
 
-    write_progress(progress_file, 0.0, "Reading metadata...")
+    partial_output_dir = output_dir + '.partial'
+    shutil.rmtree(partial_output_dir, ignore_errors=True)
 
-    with open(os.path.join(source_dir, 'metadata.json')) as f:
-        meta = json.load(f)
+    try:
+        write_progress(progress_file, 0.0, "正在检查训练数据合同...")
+        if not task.strip() and not allow_observation_only:
+            raise ConversionError("缺少真实任务指令；LeRobot 训练转换必须填写本次示范执行的具体任务")
 
-    session_id = meta['sessionId']
-    fps = meta.get('fps', 30.0)
+        with open(os.path.join(source_dir, 'metadata.json'), encoding='utf-8-sig') as f:
+            meta = json.load(f)
 
-    # --- 时间戳处理，并兼容旧格式数据 ---
-    if 'startTimeUs' in meta:
-        start_us = meta['startTimeUs']
-    else:
-        start_us = meta.get('startTime', 0) * 1000
+        session_id = meta['sessionId']
+        fps = float(meta.get('fps', 30.0))
+        if not math.isfinite(fps) or fps <= 0:
+            raise ConversionError("metadata.json 中的 fps 无效")
 
-    # --- 判断新槽位目录格式或旧扁平目录格式 ---
-    slots = meta.get('slots')
+        # --- 时间戳处理，并兼容旧格式数据 ---
+        if 'startTimeUs' in meta:
+            start_us = meta['startTimeUs']
+        else:
+            start_us = meta.get('startTime', 0) * 1000
 
-    if slots:
-        # 新格式：遍历每个槽位，并为每个槽位生成独立数据集。
-        any_ok = False
-        for slot_name, slot_meta in slots.items():
-            slot_output_dir = os.path.join(output_dir, slot_name)
-            ok = convert_slot(source_dir, slot_output_dir, session_id, fps, start_us,
-                         task, progress_file, slot_name=slot_name, slot_meta=slot_meta)
-            if ok:
-                any_ok = True
-        if not any_ok:
-            sys.stderr.write("SKIP: no slots had convertible data\n")
-            sys.exit(2)
-    else:
-        # 旧格式：单个扁平目录，保留向后兼容。
-        ok = convert_slot(source_dir, output_dir, session_id, fps, start_us,
-                     task, progress_file, slot_name=None, slot_meta=None)
-        if not ok:
-            sys.exit(2)
+        # --- 判断新槽位目录格式或旧扁平目录格式 ---
+        slots = meta.get('slots')
 
-    write_progress(progress_file, 1.0, "Done", done=True)
+        if slots and not allow_observation_only:
+            contract_errors = []
+            if len(slots) > 1:
+                contract_errors.append(
+                    "多槽位会话必须先合并为一个同步 episode，不能把左右相机拆成独立训练数据集")
+            missing_action_slots = [
+                slot_name for slot_name in slots
+                if not find_action_file(os.path.join(source_dir, slot_name))
+            ]
+            if missing_action_slots:
+                contract_errors.append(
+                    "以下槽位缺少 action_data/actions.csv: " + ", ".join(missing_action_slots))
+            if contract_errors:
+                raise ConversionError("；".join(contract_errors))
+
+        if slots:
+            # 新格式：遍历每个槽位，并为每个槽位生成独立数据集。
+            any_ok = False
+            for slot_name, slot_meta in slots.items():
+                slot_output_dir = os.path.join(partial_output_dir, slot_name)
+                ok = convert_slot(source_dir, slot_output_dir, session_id, fps, start_us,
+                             task, progress_file, slot_name=slot_name, slot_meta=slot_meta,
+                             allow_observation_only=allow_observation_only)
+                if ok:
+                    any_ok = True
+            if not any_ok:
+                raise ConversionError("所有槽位都缺少可转换的数据")
+        else:
+            # 旧格式：单个扁平目录，保留向后兼容。
+            ok = convert_slot(source_dir, partial_output_dir, session_id, fps, start_us,
+                         task, progress_file, slot_name=None, slot_meta=None,
+                         allow_observation_only=allow_observation_only)
+            if not ok:
+                raise ConversionError("会话中没有可转换的数据")
+
+        # 所有槽位成功后再原子替换正式输出，转换失败不会留下半成品目录。
+        if os.path.exists(output_dir):
+            shutil.rmtree(output_dir)
+        os.replace(partial_output_dir, output_dir)
+        write_progress(progress_file, 1.0, "转换完成", done=True)
+    except ConversionError as exc:
+        shutil.rmtree(partial_output_dir, ignore_errors=True)
+        message = str(exc)
+        write_progress(progress_file, 1.0, "训练数据校验失败", done=True, error=message)
+        sys.stderr.write(f"ERROR: {message}\n")
+        sys.exit(4)
+    except Exception as exc:
+        shutil.rmtree(partial_output_dir, ignore_errors=True)
+        message = f"转换程序异常: {exc}"
+        write_progress(progress_file, 1.0, "转换失败", done=True, error=message)
+        sys.stderr.write(f"ERROR: {message}\n")
+        sys.exit(1)
 
 
 if __name__ == '__main__':

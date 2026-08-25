@@ -767,6 +767,15 @@ body.sidebar-collapsed .sidebar-toggle-btn { left: 6px; }
     background: var(--bg); color: var(--text);
 }
 .convert-input:focus { outline: none; border-color: #3b82f6; }
+.convert-contract-note {
+    margin: 2px 0 0;
+    padding: 8px 9px;
+    border-left: 3px solid #f59e0b;
+    background: #fffbeb;
+    color: #854d0e;
+    font-size: 10px;
+    line-height: 1.6;
+}
 .convert-session-list {
     max-height: 300px; overflow-y: auto;
     display: flex; flex-wrap: wrap;

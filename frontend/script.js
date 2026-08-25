@@ -2546,7 +2546,14 @@
         var dir = document.getElementById('convertSourceDir').value.trim();
         var outDir = document.getElementById('convertOutputDir').value.trim();
         var format = document.getElementById('convertFormat').value;
-        var formatLabels = { lerobot: 'LeRobot v3.0', hdf5: 'HDF5 v1.0', rlds: 'RLDS v0.1' };
+        var taskInput = document.getElementById('convertTask');
+        var task = taskInput ? taskInput.value.trim() : '';
+        if (format === 'lerobot' && !task) {
+            showToast('LeRobot 训练转换必须填写真实任务指令', 'error');
+            if (taskInput) taskInput.focus();
+            return;
+        }
+        var formatLabels = { lerobot: 'LeRobot v3.0（训练校验）', hdf5: 'HDF5 v1.0（观测归档）', rlds: 'RLDS v0.1（观测归档）' };
         document.getElementById('convertProgressPanel').style.display = '';
         document.getElementById('convertProgressFill').style.width = '0%';
         document.getElementById('convertProgressFill').classList.remove('done');
@@ -2564,7 +2571,7 @@
         fetch('/api/convert', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'start', sourceDir: dir, sessions: sessions, task: '', outputDir: outDir, format: format })
+            body: JSON.stringify({ action: 'start', sourceDir: dir, sessions: sessions, task: task, outputDir: outDir, format: format })
         }).catch(function() {
             stopConvertPolling();
             document.getElementById('convertError').style.display = '';
@@ -2649,7 +2656,7 @@
                 return;
             }
             updateResultHeader(converted.length, skipped.length);
-            var formatLabels = { lerobot: 'LeRobot v3.0', hdf5: 'HDF5 v1.0', rlds: 'RLDS v0.1' };
+            var formatLabels = { lerobot: 'LeRobot v3.0（训练校验）', hdf5: 'HDF5 v1.0（观测归档）', rlds: 'RLDS v0.1（观测归档）' };
             var curFormat = document.getElementById('convertFormat').value;
             var fmtLabel = formatLabels[curFormat] || curFormat;
             var outputDir = document.getElementById('convertOutputDir').value.trim() || 'data_converted';

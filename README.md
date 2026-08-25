@@ -114,7 +114,7 @@ ManualGripper/
 ```text
 build/                         # 编译后的程序和 DLL
 data_capture/                  # 原始采集数据
-data_converted/                # 转换后的训练数据
+data_converted/                # 转换结果；是否可训练以数据合同校验结果为准
 ```
 
 这三个目录通常不提交到 Git，因为它们可以重新生成，或者数据量很大。
@@ -484,6 +484,24 @@ gripper.csv
 data_converted/
 ```
 
+### 训练数据与观测数据
+
+原始会话中的视频、夹爪闭合度和 IMU 属于观测数据，不等同于行为克隆需要的控制动作。
+LeRobot 转换器现在会强制检查真实 `action`，不再写入固定七维全零占位值。
+
+训练转换还要求：
+
+- 在转换页面填写真实任务指令；
+- 每个参与转换的槽位包含 `action_data/actions.csv`；
+- 动作文件包含统一时间轴和连续编号的 `action_0..action_N`；
+- 动作是控制器实际收到的命令，不能由 IMU 或占位零值代替；
+- Body22 π0.5 还必须采集三路相机、22 维关节状态和 22 维绝对关节动作。
+
+完整字段和验收方法见 [训练数据合同](docs/training-data-contract.md)。现有未保存机器人真实控制命令的历史会话
+只能作为视频和夹爪观测参考，不能通过修改 metadata 或补零恢复成训练数据。
+当前 HDF5 与 RLDS 输出保留七维占位动作只为兼容旧数据结构，元数据会明确标记
+`trainingReady=false`，页面也将其标为“观测归档”。
+
 ## 12. 常用配置
 
 配置文件：
@@ -622,6 +640,16 @@ metadata.json
 视频文件
 timestamps.csv
 ```
+
+LeRobot 转换还需要：
+
+```text
+action_data/actions.csv
+真实任务指令
+```
+
+如果页面提示“缺少真实动作文件”，说明本次会话只保存了观测数据。不要补零绕过校验；应先接入机器人
+控制桥的真实 state/action 日志并重新采集。具体格式见 [训练数据合同](docs/training-data-contract.md)。
 
 ## 14. Git 使用说明
 

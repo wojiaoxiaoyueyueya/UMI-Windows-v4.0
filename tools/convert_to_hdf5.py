@@ -283,6 +283,8 @@ def convert_slot(session_id, fps, start_us, source_dir, output_dir, slot_meta, p
         hf.attrs['session_id'] = session_id
         hf.attrs['fps'] = fps
         hf.attrs['robot_type'] = 'orbbec_umi_gripper'
+        hf.attrs['training_ready'] = False
+        hf.attrs['action_source'] = 'placeholder_zero'
 
         obs_grp = hf.create_group('observations')
         if available_videos:
@@ -313,6 +315,9 @@ def convert_slot(session_id, fps, start_us, source_dir, output_dir, slot_meta, p
         'totalFrames': nframes,
         'stateDim': obs_state.shape[1],
         'actionDim': 7,
+        'trainingReady': False,
+        'actionSource': 'placeholder_zero',
+        'warning': '当前 HDF5 action 为兼容结构的占位零值，仅作为观测归档，不能直接训练',
         'hasIMU': has_imu,
         'hasGripper': has_gripper,
         'gripperType': 'electric' if has_gripper and is_electric_gripper else ('manual' if has_gripper else 'none'),
