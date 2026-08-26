@@ -2,6 +2,8 @@
 setlocal
 
 set "APP_ROOT=%~dp0"
+rem Source runs this file from packaging; the installer places it at app root.
+if not exist "%APP_ROOT%build\ManualGripper.exe" if exist "%APP_ROOT%..\build\ManualGripper.exe" set "APP_ROOT=%APP_ROOT%..\"
 set "LOG_FILE=%APP_ROOT%startup.log"
 set "APP_EXE=%APP_ROOT%build\ManualGripper.exe"
 

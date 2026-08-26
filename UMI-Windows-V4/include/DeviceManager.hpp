@@ -46,6 +46,10 @@ public:
     explicit DeviceManager(const Config& cfg);
     ~DeviceManager();
 
+    // 进程退出时显式关闭并销毁所有当前设备和热插拔保留对象。
+    // 可重复调用，确保相机 SDK、串口和 CAN 句柄在进程结束前已经释放。
+    void shutdown();
+
     // 检测所有设备并分配槽位
     bool detectAll();
 
@@ -87,14 +91,8 @@ public:
     // 序列化为 JSON（供 API 返回）
     std::string toJson() const;
 
-    // 交换两个槽位的摄像头
-    bool swapSlots(const std::string& pos1, const std::string& pos2);
-
     // 交换左右手动夹爪槽位，用于固件左右手标识相同或物理连接顺序反向时的软件校正。
     bool swapManualGripperSlots();
-
-    // 将指定序列号的摄像头分配到目标槽位
-    bool assignCamera(const std::string& serial, const std::string& targetSlot);
 
 private:
     void detectOrbbecDevices();
@@ -108,6 +106,8 @@ private:
     std::vector<DetectedDevice> detectedDevices_;
     std::vector<DetectedGripper> detectedGrippers_;
     std::vector<std::unique_ptr<ICamera>> retiredCameras_;
+    // 热插拔替换对象后暂存到进程退出，保证 HTTP 中短暂持有的非拥有指针不会悬空。
+    std::vector<std::unique_ptr<IGripper>> retiredGrippers_;
     mutable std::mutex detectedInfoMutex_;
     uint64_t lastCameraRefreshUs_ = 0;
     uint64_t lastGripperRefreshUs_ = 0;
@@ -115,4 +115,5 @@ private:
     std::map<std::string, int> cameraMissingScanCounts_;
     bool hikSdkBannerShown_ = false;
     bool hikNoDeviceWarningShown_ = false;
+    bool shutdownCompleted_ = false;
 };

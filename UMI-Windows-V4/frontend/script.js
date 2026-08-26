@@ -11,13 +11,48 @@
 (function() {
     // ---- 侧边栏收缩/展开（localStorage 跨页面联动） ----
     var SIDEBAR_KEY = 'sidebar_collapsed';
+    var SIDEBAR_SELECTOR = '.sidebar, .collect-sidebar, .eg-sidebar, .camera-control-sidebar, .rps-sidebar, .teleop-sidebar, .trajectory-sidebar';
+    var sidebarFollowFrame = 0;
+
+    function activePageSidebar() {
+        var activePage = document.querySelector('.page.active');
+        return activePage ? activePage.querySelector(SIDEBAR_SELECTOR) : null;
+    }
+
+    function updateSidebarTogglePosition() {
+        var btn = document.getElementById('sidebarToggleBtn');
+        var sidebar = activePageSidebar();
+        if (!btn || !sidebar) return;
+        var rect = sidebar.getBoundingClientRect();
+        var half = Math.max(14, btn.offsetWidth / 2);
+        var x = Math.max(half, Math.min(window.innerWidth - half, rect.right));
+        var y = Math.max(half, Math.min(window.innerHeight - half, rect.top + rect.height / 2));
+        btn.style.left = x + 'px';
+        btn.style.top = y + 'px';
+    }
+
+    function followSidebarEdge(durationMs) {
+        if (sidebarFollowFrame) cancelAnimationFrame(sidebarFollowFrame);
+        var started = performance.now();
+        function follow(now) {
+            updateSidebarTogglePosition();
+            if (now - started < (durationMs || 0)) {
+                sidebarFollowFrame = requestAnimationFrame(follow);
+            } else {
+                sidebarFollowFrame = 0;
+            }
+        }
+        sidebarFollowFrame = requestAnimationFrame(follow);
+    }
+
     function syncSidebars(collapsed) {
-        document.querySelectorAll('.sidebar, .collect-sidebar, .eg-sidebar, .camera-control-sidebar').forEach(function(sb) {
+        document.querySelectorAll(SIDEBAR_SELECTOR).forEach(function(sb) {
             if (collapsed) { sb.classList.add('collapsed'); } else { sb.classList.remove('collapsed'); }
         });
         if (collapsed) { document.body.classList.add('sidebar-collapsed'); } else { document.body.classList.remove('sidebar-collapsed'); }
         var btn = document.getElementById('sidebarToggleBtn');
         if (btn) btn.textContent = collapsed ? '›' : '‹';
+        followSidebarEdge(320);
     }
     function initSidebarToggle() {
         var collapsed = localStorage.getItem(SIDEBAR_KEY) === '1';
@@ -37,6 +72,11 @@
                 syncSidebars(e.newValue === '1');
             }
         });
+        window.addEventListener('resize', function() { followSidebarEdge(80); });
+        document.querySelectorAll(SIDEBAR_SELECTOR).forEach(function(sb) {
+            sb.addEventListener('transitionend', updateSidebarTogglePosition);
+        });
+        followSidebarEdge(80);
     }
     initSidebarToggle();
 
@@ -110,6 +150,29 @@
     var headCameraSerial = ''; // 用户选择的头部摄像头序列号，空=不分配
     var cameraHandsSwapped = false; // 仅表示左右摄像头显示是否交换，和夹爪交换互不影响。
     var gripperSlotMap = { left: 'left', right: 'right' }; // 手动夹爪使用后端真实槽位交换，前端保持固定映射。
+    var lastHandPoseMapHash = '';
+
+    // 将前端最终显示槽位同步给视觉惯性跟踪器，保证交换后的预览、轨迹和录制数据一致。
+    function syncHandPoseMapping(force) {
+        var mapping = {
+            leftCamera: slotMap.left || 'left',
+            rightCamera: slotMap.right || 'right',
+            leftGripper: gripperSlotMap.left || 'left',
+            rightGripper: gripperSlotMap.right || 'right'
+        };
+        var hash = JSON.stringify(mapping);
+        if (!force && hash === lastHandPoseMapHash) return;
+        lastHandPoseMapHash = hash;
+        window.dispatchEvent(new CustomEvent('umi-pose-mapping', { detail: mapping }));
+        fetch('/api/hand-poses/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: hash
+        }).catch(function() {
+            // 服务重新连接后允许下一轮设备刷新再次同步。
+            lastHandPoseMapHash = '';
+        });
+    }
 
     // 根据 headCameraSerial 和 deviceInfo 重建 slotMap
     // 核心约束：每个显示位置映射到不同的后端槽位
@@ -158,6 +221,7 @@
             slotMap.left = slotMap.right;
             slotMap.right = tmp;
         }
+        syncHandPoseMapping(false);
     }
 
     // 显示键名(如 left-color) → 后端流键名(如 right-color)
@@ -233,6 +297,7 @@
             cvState.pollTimer = null;
         }
         currentPage = pageName;
+        followSidebarEdge(100);
     }
     document.querySelectorAll('.nav-tab').forEach(function(tab) {
         tab.addEventListener('click', function() { switchPage(tab.getAttribute('data-page')); });
@@ -459,8 +524,14 @@
         el.innerHTML = html;
     }
 
+    var deviceInfoRequest = null;
     function fetchDeviceInfo() {
-        return fetch('/api/devices').then(function(r){return r.json();}).then(function(d) {
+        // 定时刷新、页面切换和手动扫描可能同时触发查询；复用在途请求，避免堆积。
+        if (deviceInfoRequest) return deviceInfoRequest;
+        deviceInfoRequest = fetch('/api/devices').then(function(r){
+            if (!r.ok) throw new Error('device status request failed: ' + r.status);
+            return r.json();
+        }).then(function(d) {
             var slots = d.slots || {};
             allDevices = d.devices || [];
             ['left', 'right', 'head'].forEach(function(pos) {
@@ -485,7 +556,10 @@
             statusDot.classList.remove('online');
             statusText.textContent = '未连接';
             renderInfoPopup({}, true);
+        }).finally(function() {
+            deviceInfoRequest = null;
         });
+        return deviceInfoRequest;
     }
     window.fetchDeviceInfo = fetchDeviceInfo;
 
@@ -2840,6 +2914,7 @@
                 swapGripDisplayCalibration();
                 return fetchDeviceInfo().then(function() {
                     fetchGripperStatus();
+                    syncHandPoseMapping(true);
                     if (typeof refreshTeleopSelectors === 'function') refreshTeleopSelectors(true);
                     showToast('左右夹爪已交换', 'success');
                 });
@@ -3037,6 +3112,12 @@
             initTeleopPage();
         } else {
             stopTeleop(false);
+        }
+        if (pageName === 'trajectory') {
+            syncHandPoseMapping(true);
+            if (window.handTrajectory3d) window.handTrajectory3d.enter();
+        } else if (window.handTrajectory3d) {
+            window.handTrajectory3d.leave();
         }
     };
 
@@ -4542,6 +4623,7 @@
             currentPaths = d;
             var el = document.getElementById('collectPathDisplay');
             if (el) el.textContent = d.collect || '--';
+            if (d.success === false) showToast(d.error || '路径保存失败', 'error');
             if (type === 'collect') fetchHistory();
         }).catch(function() {});
     }
@@ -4616,11 +4698,11 @@
             fetch('/api/paths').then(function(r) { return r.json(); }).then(function(paths) {
                 var startPath;
                 if (targetId === 'convertSourceDir') {
-                    startPath = paths.collect || 'C:\\';
+                    startPath = paths.collect || 'D:\\';
                 } else if (targetId === 'convertOutputDir') {
-                    startPath = paths.converted || 'C:\\';
+                    startPath = paths.converted || 'D:\\';
                 } else {
-                    startPath = (input && input.value) ? input.value : 'C:\\';
+                    startPath = (input && input.value) ? input.value : 'D:\\';
                 }
                 openDirBrowser(function(path) {
                     if (input) input.value = path;
@@ -4628,7 +4710,7 @@
             }).catch(function() {
                 openDirBrowser(function(path) {
                     if (input) input.value = path;
-                }, 'C:\\');
+                }, 'D:\\');
             });
         });
     });
@@ -4879,12 +4961,11 @@
             if (!state.running || state.busy) return;
             state.busy = true;
             var pcUrl = API_ALT + '/api/pointcloud/' + slot;
-            console.log('[PC poll] fetching ' + pcUrl);
             fetch(pcUrl).then(function(r) {
                 if (!r.ok) return null;
                 return r.json();
             }).then(function(data) {
-                console.log('[PC poll] response has=' + (data ? data.has : 'null') + ' pLen=' + (data && data.p ? data.p.length : 0));
+                state._pollErrorWarned = false;
                 if (data && data.has && data.p && data.p.length > 0) {
                     var raw = data.p;
                     var numPts = raw.length / 6;
@@ -4933,7 +5014,12 @@
 
                     if (streamFps[key]) streamFps[key].count++;
                 }
-            }).catch(function(err){ console.warn('[PC poll] error:', err); }).then(function(){ state.busy = false; });
+            }).catch(function(err){
+                if (!state._pollErrorWarned) {
+                    console.warn('[PC poll] request failed:', err);
+                    state._pollErrorWarned = true;
+                }
+            }).finally(function(){ state.busy = false; });
         }, 500);
     }
 

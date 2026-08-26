@@ -109,7 +109,7 @@
         h2 { margin: 0; font-size: 20px; }
         .section-head p { margin: 0; color: var(--muted); font-size: 12px; }
 
-        .module-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+        .module-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
         .module {
             min-height: 142px;
             padding: 16px;
@@ -198,13 +198,13 @@
             <div>
                 <div class="eyebrow">WINDOWS CURRENT RELEASE</div>
                 <h1>UMI Windows V4 数据采集平台</h1>
-                <p class="lead">面向 UMI V4.0 手动夹爪、多相机和 CAN 电动夹爪的一体化本地采集系统，覆盖设备检测、实时预览、统一时间戳录制、控制联动、历史会话和数据转换。</p>
+                <p class="lead">面向 UMI V4.0 手动夹爪、多相机和 CAN 电动夹爪的一体化本地采集系统，覆盖设备检测、实时预览、视觉惯性三维轨迹、统一时间戳录制、控制联动、历史会话和数据转换。</p>
             </div>
             <div class="version-panel">
                 <span>当前稳定版本</span>
-                <strong>4.2.0</strong>
+                <strong>4.3.1</strong>
                 <div class="version-meta">
-                    <div><span>发布日期</span><b>2026-08-25</b></div>
+                    <div><span>发布日期</span><b>2026-08-26</b></div>
                     <div><span>协议代际</span><b>UMI V4.0</b></div>
                 </div>
             </div>
@@ -227,6 +227,7 @@
                 <article class="module"><span class="module-index">02</span><h3>设备控制</h3><p>相机参数、手动夹爪 V4 数据、CAN 电动夹爪和夹爪遥控集中操作。</p></article>
                 <article class="module"><span class="module-index">03</span><h3>时间同步</h3><p>视频帧、夹爪、IMU 和动作使用同一会话时间基准，保留逐帧时间戳。</p></article>
                 <article class="module"><span class="module-index">04</span><h3>数据交付</h3><p>提供 LeRobot、HDF5、RLDS 输出，并区分训练就绪与观察归档数据。</p></article>
+                <article class="module"><span class="module-index">05</span><h3>空间位姿</h3><p>融合左右手画面与 V4 IMU，提供可交互三维轨迹、夹爪闭合动画和双手协同稳态约束。</p></article>
             </div>
         </section>
 
@@ -255,6 +256,10 @@
                 <p>早期里程碑版本号为项目整理时补充</p>
             </div>
             <div class="release-list">
+                <div class="release-version"><strong>4.3.1</strong><span>2026-08-26</span></div>
+                <div class="release-body"><h3>空间位姿与界面稳定性修复</h3><p>加入 V4 IMU 启动零偏学习、温漂补偿、单手静止锁和视觉原点重定位；修正静止后仰、假位移、轨迹抖动及不同页面的侧栏按钮错位。</p></div>
+                <div class="release-version"><strong>4.3.0</strong><span>2026-08-26</span></div>
+                <div class="release-body"><h3>双手视觉惯性空间位姿</h3><p>新增相对三维轨迹、离线 STEP 模型、闭合联动、轨迹录制和双手协同静止约束；优化模型比例、动态取景与三维交互。</p></div>
                 <div class="release-version"><strong>4.2.0</strong><span>2026-08-25</span></div>
                 <div class="release-body"><h3>三版本总仓库与训练数据契约</h3><p>合并 V4、Windows 旧协议和 Linux 归档；修正真实 action、任务、IMU、时间戳和训练就绪校验；清理重复 SDK 与旧试验代码。</p></div>
                 <div class="release-version"><strong>4.1.2</strong><span>2026-08-17</span></div>
@@ -274,7 +279,8 @@
             </div>
         </div>
 
-        <footer>UMI Data Capture Platform 4.2.0</footer>
+        <footer>UMI Data Capture Platform 4.3.1</footer>
     </main>
+    <script src="/service-lifecycle.js?v=20260826process"></script>
 </body>
 </html>

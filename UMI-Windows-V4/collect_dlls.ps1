@@ -1,5 +1,5 @@
-# collect_dlls.ps1 - Collect all runtime DLL dependencies for portability
-# Usage: powershell -ExecutionPolicy Bypass -File collect_dlls.ps1 -BuildDir ./build
+# collect_dlls.ps1 - 递归收集可执行文件所需的运行时 DLL，保证构建目录可移植运行。
+# 用法：powershell -ExecutionPolicy Bypass -File collect_dlls.ps1 -BuildDir ./build
 
 param(
     [string]$BuildDir = ".",
@@ -15,6 +15,7 @@ $systemDlls = @(
     'ntdll', 'SHLWAPI', 'SETUPAPI', 'AVICAP32', 'USERENV', 'AVRT', 'ncrypt',
     'gdiplus', 'DWrite', 'USP10', 'OPENGL32', 'd3d11', 'dxgi', 'dwmapi',
     'uxtheme', 'msimg32', 'imm32', 'version', 'wintrust', 'oleacc', 'msasn1',
+    'MF', 'MFPlat', 'MFReadWrite',
     'netapi32', 'iphlpapi', 'dnsapi', 'winhttp', 'wldap32', 'mpr', 'netutils',
     'samlib', 'wtsapi32', 'propsys', 'shcore', 'cfgmgr32', 'powrprof',
     'kernelbase', 'cryptbase', 'sspicli', 'rpcrt4', 'combase', 'sechost',
@@ -46,15 +47,15 @@ Write-Output "MinGW bin: $MingwBin"
 Write-Output "Exe: $($exe.Name)"
 Write-Output ""
 
-$queue = @($exe.Name)
-$checked = @{}
+$queue = [System.Collections.Generic.Queue[string]]::new()
+$queue.Enqueue($exe.Name)
+$checked = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$unresolved = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 $copied = 0
 
 while ($queue.Count -gt 0) {
-    $current = $queue[0]
-    $queue = if ($queue.Count -gt 1) { $queue[1..($queue.Count-1)] } else { @() }
-    if ($checked.ContainsKey($current)) { continue }
-    $checked[$current] = $true
+    $current = $queue.Dequeue()
+    if (-not $checked.Add($current)) { continue }
 
     $fullPath = Join-Path $buildDir $current
     if (-not (Test-Path $fullPath)) { continue }
@@ -64,7 +65,7 @@ while ($queue.Count -gt 0) {
         if ($line -match 'DLL Name:\s+(\S+)') {
             $dep = $Matches[1]
             if (Test-SystemDll $dep) { continue }
-            if ($checked.ContainsKey($dep)) { continue }
+            if ($checked.Contains($dep)) { continue }
 
             $depPath = Join-Path $buildDir $dep
             if (-not (Test-Path $depPath)) {
@@ -73,10 +74,12 @@ while ($queue.Count -gt 0) {
                     Copy-Item $srcPath $buildDir -Force
                     Write-Output "  + $dep"
                     $copied++
-                    $queue += $dep
+                    $queue.Enqueue($dep)
+                } else {
+                    $unresolved.Add($dep) | Out-Null
                 }
             } else {
-                $queue += $dep
+                $queue.Enqueue($dep)
             }
         }
     }
@@ -84,4 +87,8 @@ while ($queue.Count -gt 0) {
 
 Write-Output ""
 Write-Output "=== Done! Copied $copied DLLs ==="
-Write-Output "You can now copy the entire build directory to any Windows PC."
+if ($unresolved.Count -gt 0) {
+    Write-Error ("Unresolved runtime DLLs: " + (($unresolved | Sort-Object) -join ", "))
+    exit 2
+}
+Write-Output "Runtime dependency validation passed."

@@ -74,11 +74,34 @@ HttpServer::HttpServer(const Config& cfg, const std::string& frontendDir)
 
 HttpServer::~HttpServer() { stop(); }
 
+std::string HttpServer::getRecordingBaseDir() {
+    std::lock_guard<std::mutex> lock(recordingState_.mutex);
+    return recordingState_.baseDir;
+}
+
+bool HttpServer::setRecordingBaseDir(const std::string& path) {
+    std::lock_guard<std::mutex> lock(recordingState_.mutex);
+    if (recordingState_.isRecording || recordingState_.finalizing) return false;
+    recordingState_.baseDir = path;
+    return true;
+}
+
+std::string HttpServer::getConvertOutputDir() const {
+    std::lock_guard<std::mutex> lock(pathConfigMutex_);
+    return convertOutputDir_;
+}
+
+void HttpServer::setConvertOutputDir(const std::string& path) {
+    std::lock_guard<std::mutex> lock(pathConfigMutex_);
+    convertOutputDir_ = path;
+}
+
 // ---- 启动/停止 ----
 
 void HttpServer::start() {
     svr_ = std::unique_ptr<httplib::Server>(new httplib::Server());
     setupRoutes();
+    httpListenFailed_ = false;
     running_ = true;
     finalizeWorkerRunning_ = true;
     httpThread_ = std::thread(&HttpServer::httpLoop, this);
@@ -87,7 +110,6 @@ void HttpServer::start() {
 }
 
 void HttpServer::stop() {
-    if (!running_) return;
     running_ = false;
     finalizeWorkerRunning_ = false;
     finalizeQueueCv_.notify_all();
@@ -102,7 +124,73 @@ void HttpServer::stop() {
 }
 
 void HttpServer::httpLoop() {
-    svr_->listen("0.0.0.0", port_);
+    if (!svr_->listen("0.0.0.0", port_) && running_) {
+        httpListenFailed_ = true;
+        running_ = false;
+        fprintf(stderr, "[HTTP] 无法监听端口 %d，后台将主动退出以释放设备\n", port_);
+    }
+}
+
+void HttpServer::registerClientHeartbeat(const std::string& clientId) {
+    if (clientId.empty()) return;
+    std::lock_guard<std::mutex> lock(clientLifecycleMutex_);
+    const auto now = std::chrono::steady_clock::now();
+    const auto released = releasedClients_.find(clientId);
+    if (released != releasedClients_.end()) {
+        // 页面关闭前已经发出的心跳可能晚于 release 到达，不能让它重新占用租约。
+        if (now - released->second < std::chrono::seconds(10)) return;
+        releasedClients_.erase(released);
+    }
+    clientTrackingStarted_ = true;
+    clientHeartbeats_[clientId] = now;
+    noClientSince_ = std::chrono::steady_clock::time_point();
+}
+
+void HttpServer::releaseClient(const std::string& clientId) {
+    if (clientId.empty()) return;
+    std::lock_guard<std::mutex> lock(clientLifecycleMutex_);
+    clientHeartbeats_.erase(clientId);
+    releasedClients_[clientId] = std::chrono::steady_clock::now();
+    if (clientTrackingStarted_ && clientHeartbeats_.empty()
+        && noClientSince_ == std::chrono::steady_clock::time_point()) {
+        noClientSince_ = std::chrono::steady_clock::now();
+    }
+}
+
+bool HttpServer::shouldShutdownForClientLifecycle() {
+    if (explicitShutdownRequested_.load()) return true;
+
+    std::lock_guard<std::mutex> lock(clientLifecycleMutex_);
+    if (!clientTrackingStarted_) return false;
+
+    const auto now = std::chrono::steady_clock::now();
+    const auto staleAfter = std::chrono::seconds(120);
+    for (auto it = releasedClients_.begin(); it != releasedClients_.end();) {
+        if (now - it->second > std::chrono::seconds(15)) {
+            it = releasedClients_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = clientHeartbeats_.begin(); it != clientHeartbeats_.end();) {
+        if (now - it->second > staleAfter) {
+            it = clientHeartbeats_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    if (!clientHeartbeats_.empty()) {
+        noClientSince_ = std::chrono::steady_clock::time_point();
+        return false;
+    }
+    if (noClientSince_ == std::chrono::steady_clock::time_point()) {
+        noClientSince_ = now;
+        return false;
+    }
+
+    // 页面刷新或站内跳转会短暂释放旧页面，保留几秒让新页面重新登记。
+    return now - noClientSince_ >= std::chrono::seconds(3);
 }
 
 // ---- 编码循环 ----
@@ -371,7 +459,9 @@ void HttpServer::updateDeviceInfo(const std::string& name, int pid, int vid,
 // ---- 路由注册 ----
 
 void HttpServer::updateElectricGripperData(const std::string& slot, const ElectricGripperFullState& state) {
-    auto& gs = electricGripperWebStates_[slot];
+    auto it = electricGripperWebStates_.find(slot);
+    if (it == electricGripperWebStates_.end()) return;
+    auto& gs = it->second;
     std::lock_guard<std::mutex> lock(gs.mutex);
     gs.positionDeg = state.positionDeg;
     gs.velocity = state.velocity;
@@ -387,7 +477,24 @@ void HttpServer::updateElectricGripperData(const std::string& slot, const Electr
     gs.rawFrameLen = state.rawFrameLen;
 }
 
+void HttpServer::setUmiGripper(const std::string& slot, UmiGripper* gripper) {
+    std::lock_guard<std::mutex> lock(gripperRefsMutex_);
+    umiGrippers_[slot] = gripper;
+}
+
+void HttpServer::setElectricGripper(const std::string& slot, ElectricGripper* gripper) {
+    std::lock_guard<std::mutex> lock(gripperRefsMutex_);
+    electricGrippers_[slot] = gripper;
+}
+
+UmiGripper* HttpServer::getUmiGripper(const std::string& slot) const {
+    std::lock_guard<std::mutex> lock(gripperRefsMutex_);
+    auto it = umiGrippers_.find(slot);
+    return it != umiGrippers_.end() ? it->second : nullptr;
+}
+
 ElectricGripper* HttpServer::getElectricGripper(const std::string& slot) const {
+    std::lock_guard<std::mutex> lock(gripperRefsMutex_);
     auto it = electricGrippers_.find(slot);
     return it != electricGrippers_.end() ? it->second : nullptr;
 }

@@ -2,6 +2,7 @@
 // 这里集中处理采集落盘、统一时间戳、MP4 写入、会话收尾保存，以及 LeRobot/HDF5/RLDS 转换调度。
 
 #include "HttpServer.hpp"
+#include "HandPoseManager.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -162,7 +163,8 @@ void HttpServer::recordGripper(const std::string& slot, const GripperState& stat
 }
 
 void HttpServer::recordElectricGripper(const std::string& slot, float positionDeg, float velocity, float current,
-                                        float motorTemp, float mosTemp, uint8_t errorCode, uint64_t timestampUs) {
+                                        float motorTemp, float mosTemp, uint8_t errorCode,
+                                        bool motorEnabled, uint64_t timestampUs) {
     std::lock_guard<std::mutex> lock(recordingState_.mutex);
     if (!recordingState_.isRecording) return;
 
@@ -198,12 +200,60 @@ void HttpServer::recordElectricGripper(const std::string& slot, float positionDe
         << "," << std::fixed << std::setprecision(4) << current
         << "," << std::fixed << std::setprecision(1) << motorTemp
         << "," << std::fixed << std::setprecision(1) << mosTemp
-        << "," << (int)errorCode << "\n";
+        << "," << (int)errorCode
+        << "," << (motorEnabled ? 1 : 0) << "\n";
     ss.egCount++;
     if (positionDeg < ss.egMinPos) ss.egMinPos = positionDeg;
     if (positionDeg > ss.egMaxPos) ss.egMaxPos = positionDeg;
     if (velocity > ss.egMaxVel) ss.egMaxVel = velocity;
     if (current > ss.egMaxCur) ss.egMaxCur = current;
+}
+
+void HttpServer::recordHandPose(const std::string& side, const HandPoseState& pose) {
+    if (!pose.connected || !pose.valid || pose.timestampUs == 0) return;
+
+    std::lock_guard<std::mutex> lock(recordingState_.mutex);
+    if (!recordingState_.isRecording) return;
+
+    // 位姿来自对应手动夹爪的 IMU；只有该侧夹爪流参与采集时才写入，避免生成意外数据。
+    if (!recordingState_.selectedStreams.empty()
+        && recordingState_.selectedStreams.find(side + "-gripper") == recordingState_.selectedStreams.end()) {
+        return;
+    }
+
+    const std::string folder = RecordingState::positionToFolder(side);
+    auto it = recordingState_.slots.find(folder);
+    if (it == recordingState_.slots.end()) return;
+
+    auto& ss = it->second;
+    winfs::mkdirp(ss.slotDir);
+    if (!ss.poseCsvFile.is_open()) {
+        winfs::mkdirp(ss.slotDir + "/pose_data");
+        ss.poseCsvFile.open(winfs::utf8ToAnsi(ss.slotDir + "/pose_data/trajectory.csv"));
+        if (ss.poseCsvFile.is_open()) {
+            ss.poseCsvFile
+                << "timestamp_us,session_time_us,side,x_m,y_m,z_m,qx,qy,qz,qw,"
+                << "roll_deg,pitch_deg,yaw_deg,closure,tracking_mode,visual_features,quality,"
+                << "stationary,origin_relocalized,cooperative_constraint\n";
+        }
+    }
+    if (!ss.poseCsvFile.is_open()) return;
+
+    ss.poseCsvFile << pose.timestampUs
+        << "," << toSessionTimeUs(pose.timestampUs, recordingState_.startTime)
+        << "," << side
+        << "," << std::fixed << std::setprecision(7)
+        << pose.x << "," << pose.y << "," << pose.z
+        << "," << pose.qx << "," << pose.qy << "," << pose.qz << "," << pose.qw
+        << "," << pose.roll << "," << pose.pitch << "," << pose.yaw
+        << "," << pose.closure
+        << "," << pose.mode
+        << "," << pose.visualFeatures
+        << "," << pose.quality
+        << "," << (pose.stationary ? 1 : 0)
+        << "," << (pose.originRelocalized ? 1 : 0)
+        << "," << (pose.cooperativeConstraint ? 1 : 0) << "\n";
+    ss.poseCount++;
 }
 
 
@@ -707,6 +757,7 @@ bool HttpServer::finalizeRecording(std::string sessionId,
             if (csvKv.second.is_open()) csvKv.second.close();
         }
         if (ss.gripperCsvFile.is_open()) ss.gripperCsvFile.close();
+        if (ss.poseCsvFile.is_open()) ss.poseCsvFile.close();
     }
 
     // 清理没有视频帧、没有手动夹爪数据、也没有电动夹爪数据的空槽位。
@@ -715,7 +766,7 @@ bool HttpServer::finalizeRecording(std::string sessionId,
         auto& ss = it->second;
         uint64_t totalFrames = 0;
         for (auto& fcKv : ss.frameCount) totalFrames += fcKv.second;
-        if (totalFrames == 0 && ss.gripperCount == 0 && ss.egCount == 0) {
+        if (totalFrames == 0 && ss.gripperCount == 0 && ss.egCount == 0 && ss.poseCount == 0) {
             if (!ss.slotDir.empty()) {
                 RemoveDirectoryA(winfs::utf8ToAnsi(ss.slotDir).c_str());
             }
@@ -819,7 +870,13 @@ bool HttpServer::finalizeRecording(std::string sessionId,
                 ofs << ", \"maxVelocityRpm\": " << std::fixed << std::setprecision(4) << ss.egMaxVel;
                 ofs << ", \"maxCurrentA\": " << std::fixed << std::setprecision(4) << ss.egMaxCur;
             }
-            ofs << "}\n";
+            ofs << "},\n";
+            ofs << "      \"pose\": {\"file\": ";
+            if (ss.poseCount > 0) ofs << "\"pose_data/trajectory.csv\"";
+            else ofs << "null";
+            ofs << ", \"frames\": " << ss.poseCount
+                << ", \"coordinateFrame\": \"relative_start\", \"unit\": \"meter\""
+                << ", \"cooperativeMode\": \"dual_hand_zupt\"}\n";
 
             ofs << "    }";
         }
@@ -994,15 +1051,23 @@ bool HttpServer::startConversion(const std::string& sourceDir,
     }
     if (convertThread_.joinable()) convertThread_.join();
 
-    convertThread_ = std::thread([this, sourceDir, sessions, task, outputDir, format]() {
-        std::string projectRoot = recordingState_.baseDir;
+    const std::string recordingBaseDir = getRecordingBaseDir();
+    const std::string defaultOutputDir = getConvertOutputDir();
+    const std::string conversionScriptPath = convertScriptPath_;
+    const std::string webRoot = frontendDir_;
+
+    convertThread_ = std::thread([this, sourceDir, sessions, task, outputDir, format,
+                                  recordingBaseDir, defaultOutputDir,
+                                  conversionScriptPath, webRoot]() {
+        std::string projectRoot = recordingBaseDir;
         auto pos = projectRoot.rfind('/');
         if (pos == std::string::npos) pos = projectRoot.rfind('\\');
         if (pos != std::string::npos) projectRoot = projectRoot.substr(0, pos);
 
-        std::string srcDir = recordingState_.baseDir;
+        std::string srcDir = recordingBaseDir;
         if (!sourceDir.empty()) {
-            if (sourceDir[0] == '/' || sourceDir[0] == '\\' || sourceDir.size() >= 2 && sourceDir[1] == ':') {
+            if (sourceDir[0] == '/' || sourceDir[0] == '\\' ||
+                (sourceDir.size() >= 2 && sourceDir[1] == ':')) {
                 std::string r = winfs::resolvePath(sourceDir);
                 if (winfs::dirExists(r)) srcDir = r;
             } else {
@@ -1011,9 +1076,10 @@ bool HttpServer::startConversion(const std::string& sourceDir,
             }
         }
 
-        std::string outDir = convertOutputDir_;
+        std::string outDir = defaultOutputDir;
         if (!outputDir.empty()) {
-            if (outputDir[0] == '/' || outputDir[0] == '\\' || outputDir.size() >= 2 && outputDir[1] == ':') {
+            if (outputDir[0] == '/' || outputDir[0] == '\\' ||
+                (outputDir.size() >= 2 && outputDir[1] == ':')) {
                 std::string r = winfs::resolvePath(outputDir);
                 if (winfs::dirExists(r)) outDir = r;
             } else {
@@ -1022,7 +1088,7 @@ bool HttpServer::startConversion(const std::string& sourceDir,
         }
         winfs::mkdirp(outDir);
 
-        std::string script = convertScriptPath_;
+        std::string script = conversionScriptPath;
         if (format == "hdf5") {
             auto p = script.rfind("convert_to_lerobot.py");
             if (p != std::string::npos) script.replace(p, 22, "convert_to_hdf5.py");
@@ -1044,7 +1110,7 @@ bool HttpServer::startConversion(const std::string& sourceDir,
             DeleteFileW(winfs::utf8ToWide(progressPath).c_str());
 
             // 安装版优先使用项目内置 Python；源码运行时回退到系统 Python。
-            std::string bundledPython = winfs::resolvePath(frontendDir_ + "/../runtime/python/python.exe");
+            std::string bundledPython = winfs::resolvePath(webRoot + "/../runtime/python/python.exe");
             const std::string pythonExecutable = winfs::fileExists(bundledPython)
                 ? bundledPython
                 : "python";

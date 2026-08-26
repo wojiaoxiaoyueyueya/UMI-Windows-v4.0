@@ -14,6 +14,24 @@
     const SIDEBAR_KEY = 'sidebar_collapsed';
     const sidebar = document.querySelector('.sidebar');
     const sidebarBtn = document.getElementById('sidebarToggleBtn');
+    let sidebarFollowFrame = 0;
+    function updateDashboardSidebarButton() {
+        if (!sidebar || !sidebarBtn) return;
+        const rect = sidebar.getBoundingClientRect();
+        const half = Math.max(14, sidebarBtn.offsetWidth / 2);
+        sidebarBtn.style.left = Math.max(half, Math.min(window.innerWidth - half, rect.right)) + 'px';
+        sidebarBtn.style.top = Math.max(half, Math.min(window.innerHeight - half, rect.top + rect.height / 2)) + 'px';
+    }
+    function followDashboardSidebar(durationMs) {
+        if (sidebarFollowFrame) cancelAnimationFrame(sidebarFollowFrame);
+        const started = performance.now();
+        function follow(now) {
+            updateDashboardSidebarButton();
+            if (now - started < (durationMs || 0)) sidebarFollowFrame = requestAnimationFrame(follow);
+            else sidebarFollowFrame = 0;
+        }
+        sidebarFollowFrame = requestAnimationFrame(follow);
+    }
     function syncDashboardSidebar(collapsed) {
         if (sidebar) {
             if (collapsed) sidebar.classList.add('collapsed');
@@ -22,6 +40,7 @@
         if (collapsed) document.body.classList.add('sidebar-collapsed');
         else document.body.classList.remove('sidebar-collapsed');
         if (sidebarBtn) sidebarBtn.textContent = collapsed ? '›' : '‹';
+        followDashboardSidebar(320);
     }
     if (sidebarBtn) {
         syncDashboardSidebar(localStorage.getItem(SIDEBAR_KEY) === '1');
@@ -34,6 +53,9 @@
         window.addEventListener('storage', function(e) {
             if (e.key === SIDEBAR_KEY) syncDashboardSidebar(e.newValue === '1');
         });
+        window.addEventListener('resize', function() { followDashboardSidebar(80); });
+        if (sidebar) sidebar.addEventListener('transitionend', updateDashboardSidebarButton);
+        followDashboardSidebar(80);
     }
 
     // API 基础路径（同源部署，留空）

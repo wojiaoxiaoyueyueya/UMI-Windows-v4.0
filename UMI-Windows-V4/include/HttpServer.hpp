@@ -15,12 +15,16 @@
 #include <fstream>
 #include <list>
 #include <functional>
+#include <chrono>
 #include <opencv2/opencv.hpp>
 
 #include "UmiGripper.hpp"
 #include "IGripper.hpp"
 #include "ElectricGripper.hpp"
 #include "Config.hpp"
+
+class HandPoseManager;
+struct HandPoseState;
 #include "DeviceManager.hpp"
 #include "ICamera.hpp"
 
@@ -186,6 +190,10 @@ struct RecordingState {
         // 夹爪 CSV 文件句柄，同一槽位的手动/电动夹爪数据都写入 gripper_data/gripper.csv。
         std::ofstream gripperCsvFile;
 
+        // 视觉惯性位姿轨迹。左右手分别保存到各自槽位，时间基准与视频和夹爪 CSV 一致。
+        std::ofstream poseCsvFile;
+        uint64_t poseCount = 0;
+
         // 时间戳同步信息：记录第一帧视频时间，便于 metadata 描述会话时间基准。
         uint64_t firstVideoDeviceTimestamp = 0;
         bool hasFirstVideoTimestamp = false;
@@ -262,16 +270,22 @@ public:
 
     void start();
     void stop();
+    bool hasHttpListenFailed() const { return httpListenFailed_.load(); }
+    bool shouldShutdownForClientLifecycle();
     void setDeviceManager(DeviceManager* mgr) { deviceManager_ = mgr; }
+    void setHandPoseManager(HandPoseManager* mgr) { handPoseManager_ = mgr; }
 
     // 单摄像头（向后兼容）
     void updateColorFrame(const cv::Mat& mat);
     void updateGripperData(const std::string& slot, const GripperState& state);
     void recordGripper(const std::string& slot, const GripperState& state);
     void recordElectricGripper(const std::string& slot, float positionDeg, float velocity, float current,
-                               float motorTemp, float mosTemp, uint8_t errorCode, uint64_t timestampUs);
-    void setUmiGripper(const std::string& slot, UmiGripper* mgr) { umiGrippers_[slot] = mgr; gripperWebStates_[slot]; }
-    void setElectricGripper(const std::string& slot, ElectricGripper* gripper) { electricGrippers_[slot] = gripper; electricGripperWebStates_[slot]; }
+                               float motorTemp, float mosTemp, uint8_t errorCode,
+                               bool motorEnabled, uint64_t timestampUs);
+    void recordHandPose(const std::string& side, const HandPoseState& pose);
+    void setUmiGripper(const std::string& slot, UmiGripper* mgr);
+    void setElectricGripper(const std::string& slot, ElectricGripper* gripper);
+    UmiGripper* getUmiGripper(const std::string& slot) const;
     void updateElectricGripperData(const std::string& slot, const ElectricGripperFullState& state);
     ElectricGripper* getElectricGripper(const std::string& slot) const;
     void updateDeviceInfo(const std::string& name, int pid, int vid,
@@ -310,6 +324,18 @@ private:
     std::thread encodeThread_;
     std::mutex encodeMutex_;
     std::condition_variable encodeCv_;
+    std::atomic<bool> httpListenFailed_{false};
+
+    // 网页客户端生命周期：最后一个平台页面关闭后，通知主程序释放全部硬件并退出。
+    // 正常关闭依靠 release 请求快速退出；浏览器崩溃时依靠心跳超时兜底。
+    std::mutex clientLifecycleMutex_;
+    std::map<std::string, std::chrono::steady_clock::time_point> clientHeartbeats_;
+    std::map<std::string, std::chrono::steady_clock::time_point> releasedClients_;
+    std::chrono::steady_clock::time_point noClientSince_;
+    bool clientTrackingStarted_ = false;
+    std::atomic<bool> explicitShutdownRequested_{false};
+    void registerClientHeartbeat(const std::string& clientId);
+    void releaseClient(const std::string& clientId);
 
     // 单摄像头（向后兼容）
     StreamState colorState_;
@@ -320,8 +346,10 @@ private:
     ConvertState convertState_;
     std::map<std::string, UmiGripper*> umiGrippers_;  // slot -> gripper pointer (non-owning)
     std::map<std::string, ElectricGripper*> electricGrippers_;  // slot -> electric gripper (non-owning)
+    mutable std::mutex gripperRefsMutex_;  // 保护热插拔更新和 HTTP 工作线程读取的非拥有指针
     std::map<std::string, ElectricGripperWebState> electricGripperWebStates_;  // slot -> state
     DeviceManager* deviceManager_ = nullptr;
+    HandPoseManager* handPoseManager_ = nullptr;
 
     // 多摄像头流状态
     std::map<std::string, CameraStreamStates> cameraStates_;  // slot -> states
@@ -329,6 +357,7 @@ private:
 
     std::string convertScriptPath_;
     std::string convertOutputDir_;
+    mutable std::mutex pathConfigMutex_;
     std::thread convertThread_;
 
     // 保存任务队列：排队保存，第一个完成后第二个开始
@@ -355,6 +384,10 @@ private:
     cv::Mat applyCameraImageControls(const std::string& slot, const cv::Mat& frame, const std::string& streamType = "color");
     void setupRoutes();
     void setupMultiCameraRoutes();
+    std::string getRecordingBaseDir();
+    bool setRecordingBaseDir(const std::string& path);
+    std::string getConvertOutputDir() const;
+    void setConvertOutputDir(const std::string& path);
 
     bool startConversion(const std::string& sourceDir, const std::vector<std::string>& sessions,
                           const std::string& task, const std::string& outputDir = "",

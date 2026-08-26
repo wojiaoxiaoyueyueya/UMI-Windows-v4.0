@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "4.2.0"
+  #define AppVersion "4.3.1"
 #endif
 
 #define AppName "UMI 数据采集平台"
@@ -43,7 +43,9 @@ Name: "{app}\data_converted"; Permissions: users-modify
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\StartUMI.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\build\{#AppExeName}"
+Name: "{autoprograms}\退出 {#AppName}"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\StopUMI.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\build\{#AppExeName}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\StartUMI.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\build\{#AppExeName}"
+Name: "{autodesktop}\退出 {#AppName}"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\StopUMI.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\build\{#AppExeName}"
 
 [Run]
 Filename: "{cmd}"; Parameters: "/C taskkill /IM {#AppExeName} /F >nul 2>&1"; StatusMsg: "正在关闭旧版后台服务..."; Flags: runhidden waituntilterminated

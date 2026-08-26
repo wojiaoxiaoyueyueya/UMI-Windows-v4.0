@@ -13,7 +13,7 @@
 | `src/OrbbecCamera.cpp` | Orbbec 相机封装，负责彩色、深度、红外、点云回调。 |
 | `src/UmiGripper.cpp` | UMI 手动夹爪串口通信、按钮、位置和 LED 控制。 |
 | `src/ElectricGripper.cpp` | 电动夹爪通信，支持 GCAN USBCAN 和 ESP32-CAN 串口桥，负责位置/速度/电流控制和状态解析。 |
-| `src/SlamManager.cpp` | 可选 SLAM/位姿记录模块。 |
+| `src/HandPoseManager.cpp` | 左右手视觉惯性跟踪，融合相机光流、V4 IMU、闭合度，并在双手共同静止时执行协同零速度约束。 |
 | `src/http/HttpServer.cpp` | HTTP 服务生命周期、MJPEG 编码循环、实时状态更新。 |
 | `src/http/HttpServerRoutes.cpp` | REST API、静态页面、MJPEG 流、设备控制接口。 |
 | `src/http/HttpServerRecording.cpp` | 录制、保存、时间戳、metadata、异步收尾和数据转换调度。 |
@@ -39,7 +39,10 @@
 | `frontend/dashboard.html` | 数据看板入口。 |
 | `frontend/dashboard.js` | 数据看板逻辑，读取历史会话、转换结果、删除数据。 |
 | `frontend/dashboard.css` | 数据看板样式。 |
-| `frontend/script.js` | 采集控制台逻辑，包括设备状态、视频流、录制、转换、夹爪控制、剪刀石头布。 |
+| `frontend/script.js` | 采集控制台逻辑，包括设备状态、视频流、录制、转换、夹爪控制、剪刀石头布和槽位映射同步。 |
+| `frontend/trajectory3d.js` | 空间位姿页的 Three.js 源码、轨迹倍率与动态取景、模型加载、交互控制和闭合动画。 |
+| `frontend/trajectory3d.bundle.js` | 已打包的离线三维运行脚本，普通用户不需要 Node.js。 |
+| `frontend/assets/models/umi-gripper.glb` | 浏览器运行时使用的手动夹爪三维模型。 |
 | `frontend/style.css` | 采集控制台样式。 |
 | `frontend/info.html` | 当前版本和项目简介页面。 |
 
@@ -50,7 +53,8 @@
 | `tools/convert_to_lerobot.py` | 原始会话转换为 LeRobot 数据集。 |
 | `tools/convert_to_hdf5.py` | 原始会话转换为 HDF5 数据集。 |
 | `tools/convert_to_rlds.py` | 原始会话转换为 RLDS/TFRecord 风格数据。 |
-| `collect_dlls.ps1` | 构建后补充收集运行 DLL。 |
+| `tools/convert_gripper_step.py` | 将 `assets/cad/umi_gripper` 中的完整 STEP 装配转换为网页 GLB。 |
+| `collect_dlls.ps1` | CMake 构建后自动递归收集并校验运行时 DLL，也可由开发者手动复核。 |
 
 ## 第三方依赖目录
 

@@ -125,7 +125,7 @@ cmake --build build -j 4
 build/ManualGripper.exe
 ```
 
-CMake 会复制直接依赖的海康、Orbbec、GCAN 和 MinGW DLL。若运行时仍提示缺少 DLL，执行：
+CMake 会先复制海康、Orbbec、GCAN、MinGW 和 OpenCV 直接依赖，再自动调用 `collect_dlls.ps1` 递归补齐间接依赖。依赖无法解析时构建会失败，不应继续发布该构建目录。需要单独复核已有构建目录时可执行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\collect_dlls.ps1 -BuildDir .\build
@@ -189,6 +189,7 @@ ManualGripper/
 │  ├─ OrbbecCamera.cpp            彩色、深度、红外和点云
 │  ├─ UmiGripper.cpp              UMI V4.0 串口协议
 │  ├─ ElectricGripper.cpp         GCAN 与 ESP32-CAN 控制
+│  ├─ HandPoseManager.cpp         左右手视觉惯性相对位姿
 │  └─ http/
 │     ├─ HttpServer.cpp           实时状态与图像编码
 │     ├─ HttpServerRoutes.cpp     HTTP 路由
@@ -212,6 +213,7 @@ ManualGripper/
   -> HikCamera / OrbbecCamera / UmiGripper / ElectricGripper
   -> DeviceManager 检测、协议验证和槽位分配
   -> main.cpp 启动采集回调与轮询线程
+  -> HandPoseManager 融合手部相机、V4 IMU 和闭合度
   -> HttpServer 实时状态、MJPEG 编码和录制队列
   -> Web 页面预览与控制
   -> data_capture 原始会话
@@ -299,6 +301,9 @@ extra
 | `POST /api/gripper/:slot/control` | 手动夹爪控制指令 |
 | `GET /api/electric-gripper/:slot` | 电动夹爪状态 |
 | `POST /api/electric-gripper/:slot/control` | 电动夹爪控制 |
+| `GET /api/hand-poses` | 左右手相对位置、姿态、闭合度和跟踪质量 |
+| `POST /api/hand-poses/config` | 同步左右摄像头及夹爪槽位映射 |
+| `POST /api/hand-poses/reset` | 重置左手、右手或全部相对位姿原点 |
 | `GET/POST /api/record` | 录制状态、开始和停止 |
 | `GET /api/record/save_status` | 异步保存进度 |
 | `POST /api/record/cancel_save` | 取消并清理保存任务 |
@@ -321,6 +326,7 @@ extra
 4. 保存阶段可以异步排队，但不能改变原始采集时间戳。
 5. 新增字段后同步修改 metadata、CSV 表头、转换脚本和说明页面。
 6. 左右设备交换后，文件目录、CSV `slot` 字段和页面映射必须一致。
+7. 视觉惯性位姿保存到对应槽位的 `pose_data/trajectory.csv`，必须沿用会话微秒时间基准；双手协同约束状态写入 `cooperative_constraint`。
 
 修改录制代码后至少录制 10 秒测试数据，检查：
 
@@ -411,6 +417,15 @@ GCAN 和 ESP32-CAN 都必须收到电机真实反馈后才能判断在线。串�
 - MJPEG 请求是否保持连接。
 - 浏览器是否允许 IMX335 摄像头权限。
 - `frontend/lib/mediapipe/` 是否返回 200。
+- `frontend/trajectory3d.bundle.js` 和 `frontend/assets/models/umi-gripper.glb` 是否返回 200。
+
+修改 `frontend/trajectory3d.js` 后，用下面的开发命令重新生成随仓库交付的离线包：
+
+```powershell
+npx --yes esbuild@0.25.9 frontend/trajectory3d.js --bundle --format=iife --platform=browser --target=es2018 --minify --outfile=frontend/trajectory3d.bundle.js
+```
+
+普通运行和安装包不需要 Node.js；只有修改三维源码时才需要执行该命令。
 
 ## 14. 回归测试清单
 
@@ -427,6 +442,7 @@ GCAN 和 ESP32-CAN 都必须收到电机真实反馈后才能判断在线。串�
 9. 视频时长与统一时间戳一致。
 10. LeRobot、HDF5、RLDS 至少执行目标格式的最小转换测试。
 11. Edge/Chrome 页面无明显遮挡、控制台异常或资源 404。
+12. 空间位姿页只显示已连接夹爪，左右交换正确，旋转/缩放/动态取景可用，模型完全闭合、显示倍率、双手协同状态和 `pose_data/trajectory.csv` 正常。
 
 没有连接对应硬件时，应在提交说明中明确写出未覆盖的实机测试项。
 

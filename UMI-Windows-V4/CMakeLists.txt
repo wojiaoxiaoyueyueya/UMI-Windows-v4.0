@@ -90,7 +90,7 @@ set(SOURCES
     src/HikCamera.cpp
     src/DeviceManager.cpp
     src/OrbbecCamera.cpp
-    src/SlamManager.cpp
+    src/HandPoseManager.cpp
     src/utils/JsonHelper.cpp
 )
 
@@ -189,6 +189,22 @@ foreach(_cv_lib ${OpenCV_LIBS})
     endif()
 endforeach()
 
+# OpenCV 的 video/calib3d 等模块还会间接依赖 flann、dnn 等 DLL。
+# 构建结束后递归解析可执行文件和已复制 DLL，确保 build 目录本身即可直接运行。
+find_program(POWERSHELL_EXECUTABLE NAMES powershell.exe pwsh.exe)
+if(NOT POWERSHELL_EXECUTABLE)
+    message(FATAL_ERROR "PowerShell was not found; runtime DLL collection cannot continue")
+endif()
+set_property(TARGET ManualGripper APPEND PROPERTY
+    LINK_DEPENDS "${CMAKE_SOURCE_DIR}/collect_dlls.ps1")
+add_custom_command(TARGET ManualGripper POST_BUILD
+    COMMAND "${POWERSHELL_EXECUTABLE}" -NoProfile -ExecutionPolicy Bypass
+        -File "${CMAKE_SOURCE_DIR}/collect_dlls.ps1"
+        -BuildDir "$<TARGET_FILE_DIR:ManualGripper>"
+        -MingwBin "${MSYS2_ROOT}/bin"
+    COMMENT "Collecting transitive runtime DLL dependencies"
+)
+
 # 广成科技 CAN SDK DLL
 if(EXISTS "${CMAKE_SOURCE_DIR}/lib/gcan/ECanVci64.dll")
     add_custom_command(TARGET ManualGripper POST_BUILD
@@ -211,4 +227,3 @@ add_custom_command(TARGET ManualGripper POST_BUILD
 
 message(STATUS "OpenCV include: ${OpenCV_INCLUDE_DIRS}")
 message(STATUS "MSYS2 root: ${MSYS2_ROOT}")
-message(STATUS "Tip: Run collect_dlls.ps1 after build to collect all transitive DLL dependencies")

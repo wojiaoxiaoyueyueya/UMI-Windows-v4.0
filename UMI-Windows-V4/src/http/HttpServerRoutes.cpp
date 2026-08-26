@@ -2,6 +2,7 @@
 // 集中管理 REST 接口、静态前端入口、MJPEG 推流接口，以及相机/夹爪等设备控制接口。
 
 #include "HttpServer.hpp"
+#include "HandPoseManager.hpp"
 #include "httplib.h"
 
 #include <algorithm>
@@ -26,6 +27,41 @@ void HttpServer::setupRoutes() {
         res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
         res.set_header("Access-Control-Allow-Headers", "Content-Type");
         res.status = 204;
+    });
+
+    // 启动器使用该接口确认 8080 上运行的是本项目，而不是其他本地服务。
+    svr_->Get("/api/system/status", [](const httplib::Request&, httplib::Response& res) {
+        json::sendJson(res, "{\"service\":\"umi-data-capture-platform\",\"status\":\"ok\"}");
+    });
+
+    // 每个打开的平台页面登记独立客户端。最后一个页面释放后，主程序会走完整
+    // 清理流程退出；心跳超时用于浏览器崩溃或断电式关页时的兜底回收。
+    svr_->Post("/api/system/client/heartbeat", [this](const httplib::Request& req, httplib::Response& res) {
+        const std::string clientId = json::extractStr(req.body, "clientId");
+        if (clientId.empty() || clientId.size() > 128) {
+            res.status = 400;
+            json::sendJson(res, "{\"ok\":false,\"error\":\"invalid client id\"}");
+            return;
+        }
+        registerClientHeartbeat(clientId);
+        json::sendJson(res, "{\"ok\":true}");
+    });
+
+    svr_->Post("/api/system/client/release", [this](const httplib::Request& req, httplib::Response& res) {
+        const std::string clientId = json::extractStr(req.body, "clientId");
+        if (!clientId.empty() && clientId.size() <= 128) releaseClient(clientId);
+        json::sendJson(res, "{\"ok\":true}");
+    });
+
+    // 仅允许本机显式退出后台，避免局域网中的其他设备误关采集服务。
+    svr_->Post("/api/system/shutdown", [this](const httplib::Request& req, httplib::Response& res) {
+        if (req.remote_addr != "127.0.0.1" && req.remote_addr != "::1") {
+            res.status = 403;
+            json::sendJson(res, "{\"ok\":false,\"error\":\"local request required\"}");
+            return;
+        }
+        explicitShutdownRequested_ = true;
+        json::sendJson(res, "{\"ok\":true}");
     });
 
     // 单帧快照（调试用）
@@ -120,10 +156,10 @@ void HttpServer::setupRoutes() {
             json += ",\"" + kv.first + "-pointcloud\":";
             json += isStreamActive(kv.first, "pointcloud") ? "true" : "false";
         }
-        // 添加每槽夹爪状态
-        for (auto& kv : umiGrippers_) {
-            json += ",\"" + kv.first + "-gripper\":";
-            json += isStreamActive(kv.first, "gripper") ? "true" : "false";
+        // 槽位名称固定，不遍历可能由热插拔线程更新的夹爪引用表。
+        for (const auto& slot : {std::string("left"), std::string("right"), std::string("extra")}) {
+            json += ",\"" + slot + "-gripper\":";
+            json += isStreamActive(slot, "gripper") ? "true" : "false";
         }
         json += "}";
         json::sendJson(res, json);
@@ -171,9 +207,9 @@ void HttpServer::setupRoutes() {
             json += ",\"" + kv.first + "-pointcloud\":";
             json += isStreamActive(kv.first, "pointcloud") ? "true" : "false";
         }
-        for (auto& kv : umiGrippers_) {
-            json += ",\"" + kv.first + "-gripper\":";
-            json += isStreamActive(kv.first, "gripper") ? "true" : "false";
+        for (const auto& slot : {std::string("left"), std::string("right"), std::string("extra")}) {
+            json += ",\"" + slot + "-gripper\":";
+            json += isStreamActive(slot, "gripper") ? "true" : "false";
         }
         json += "}";
         json::sendJson(res, json);
@@ -182,13 +218,16 @@ void HttpServer::setupRoutes() {
     // 夹爪数据查询（按 slot）
     auto gripperJsonHelper = [this](const std::string& slot) -> std::string {
         auto it = gripperWebStates_.find(slot);
-        if (it == gripperWebStates_.end() || !it->second.hasData) {
+        if (it == gripperWebStates_.end()) {
             return "{\"has\":false,\"connected\":false,\"slot\":\"" + slot + "\"}";
         }
         auto& gs = it->second;
         std::lock_guard<std::mutex> lock(gs.mutex);
-        auto git = umiGrippers_.find(slot);
-        bool connected = (git != umiGrippers_.end() && git->second && git->second->isConnected());
+        if (!gs.hasData) {
+            return "{\"has\":false,\"connected\":false,\"slot\":\"" + slot + "\"}";
+        }
+        UmiGripper* gripper = getUmiGripper(slot);
+        bool connected = gripper && gripper->isConnected();
         char json[4096];
         snprintf(json, sizeof(json),
             "{\"has\":true,\"connected\":%s,\"slot\":\"%s\","
@@ -228,7 +267,12 @@ void HttpServer::setupRoutes() {
     // 向后兼容：无 slot 参数返回第一个有数据的夹爪
     svr_->Get("/api/gripper", [this, gripperJsonHelper](const httplib::Request&, httplib::Response& res) {
         for (auto& kv : gripperWebStates_) {
-            if (kv.second.hasData) {
+            bool hasData = false;
+            {
+                std::lock_guard<std::mutex> lock(kv.second.mutex);
+                hasData = kv.second.hasData;
+            }
+            if (hasData) {
                 json::sendJson(res, gripperJsonHelper(kv.first));
                 return;
             }
@@ -239,8 +283,7 @@ void HttpServer::setupRoutes() {
     // 夹爪控制辅助函数
     auto gripperControlHelper = [this](const std::string& slot, const std::string& body) -> std::string {
         std::string action = json::extractStr(body, "action");
-        auto git = umiGrippers_.find(slot);
-        UmiGripper* gripper = (git != umiGrippers_.end()) ? git->second : nullptr;
+        UmiGripper* gripper = getUmiGripper(slot);
 
         if (action == "connect") {
             bool ok = false;
@@ -280,7 +323,7 @@ void HttpServer::setupRoutes() {
             if (r < 0 || g < 0 || b < 0 || brightness < 0) {
                 return "{\"success\":false,\"error\":\"missing led parameters\"}";
             }
-            // 优先从 umiGrippers_ 取，否则从 DeviceManager 回退
+            // 优先使用已激活的夹爪引用，否则从设备管理器回退。
             if (gripper) {
                 gripper->setLed(r, g, b, brightness);
                 return "{\"success\":true}";
@@ -304,8 +347,11 @@ void HttpServer::setupRoutes() {
     // 向后兼容
     svr_->Post("/api/gripper/control", [this, gripperControlHelper](const httplib::Request& req, httplib::Response& res) {
         std::string slot = "left";
-        for (auto& kv : umiGrippers_) {
-            if (kv.second) { slot = kv.first; break; }
+        for (const auto& candidate : {std::string("left"), std::string("right"), std::string("extra")}) {
+            if (getUmiGripper(candidate)) {
+                slot = candidate;
+                break;
+            }
         }
         json::sendJson(res, gripperControlHelper(slot, req.body));
     });
@@ -481,7 +527,7 @@ void HttpServer::setupRoutes() {
 
     // 录制历史
     svr_->Get("/api/record/history", [this](const httplib::Request&, httplib::Response& res) {
-        std::string baseDir = recordingState_.baseDir;
+        std::string baseDir = getRecordingBaseDir();
         std::string historyPath = baseDir + "/_history.txt";
         std::vector<std::string> sessions;
         auto addSession = [&](const std::string& sid) {
@@ -526,7 +572,7 @@ void HttpServer::setupRoutes() {
 
     // 可转换会话列表
     svr_->Get("/api/convert/sessions", [this](const httplib::Request& req, httplib::Response& res) {
-        std::string sourceDir = recordingState_.baseDir;
+        std::string sourceDir = getRecordingBaseDir();
         std::string dirParam = req.get_param_value("dir");
         if (!dirParam.empty()) {
             std::string resolved = winfs::resolvePath(dirParam);
@@ -608,37 +654,54 @@ void HttpServer::setupRoutes() {
 
     // 路径配置
     svr_->Get("/api/paths", [this](const httplib::Request&, httplib::Response& res) {
+        const std::string collectDir = getRecordingBaseDir();
+        const std::string convertDir = getConvertOutputDir();
         char json[2048];
         snprintf(json, sizeof(json),
             "{\"collect\":\"%s\",\"converted\":\"%s\"}",
-            json::escape(recordingState_.baseDir).c_str(),
-            json::escape(convertOutputDir_).c_str());
+            json::escape(collectDir).c_str(),
+            json::escape(convertDir).c_str());
         json::sendJson(res, json);
     });
 
     svr_->Post("/api/paths", [this](const httplib::Request& req, httplib::Response& res) {
         std::string collect = json::extractStr(req.body, "collect");
         std::string converted = json::extractStr(req.body, "converted");
+        bool success = true;
+        std::string error;
         if (!collect.empty()) {
             std::string resolved = winfs::resolvePath(collect);
-            if (winfs::dirExists(resolved)) recordingState_.baseDir = resolved;
+            if (!winfs::dirExists(resolved)) {
+                success = false;
+                error = "collect directory does not exist";
+            } else if (!setRecordingBaseDir(resolved)) {
+                success = false;
+                error = "录制或保存过程中不能修改采集目录";
+            }
         }
         if (!converted.empty()) {
             std::string resolved = winfs::resolvePath(converted);
-            if (winfs::dirExists(resolved)) convertOutputDir_ = resolved;
+            if (!winfs::dirExists(resolved)) {
+                success = false;
+                if (error.empty()) error = "converted directory does not exist";
+            } else {
+                setConvertOutputDir(resolved);
+            }
         }
+        const std::string collectDir = getRecordingBaseDir();
+        const std::string convertDir = getConvertOutputDir();
         char json[2048];
         snprintf(json, sizeof(json),
-            "{\"collect\":\"%s\",\"converted\":\"%s\"}",
-            json::escape(recordingState_.baseDir).c_str(),
-            json::escape(convertOutputDir_).c_str());
+            "{\"success\":%s,\"error\":\"%s\",\"collect\":\"%s\",\"converted\":\"%s\"}",
+            success ? "true" : "false", json::escape(error).c_str(),
+            json::escape(collectDir).c_str(), json::escape(convertDir).c_str());
         json::sendJson(res, json);
     });
 
     // 目录浏览
     svr_->Get("/api/browse-dir", [this](const httplib::Request& req, httplib::Response& res) {
         std::string dirPath = req.get_param_value("path");
-        if (dirPath.empty()) dirPath = "C:\\";
+        if (dirPath.empty()) dirPath = "D:\\";
 
         std::string parent = dirPath;
         // 统一路径分隔符，避免前端传入的斜杠和 Windows 反斜杠混用。
@@ -675,12 +738,8 @@ void HttpServer::setupRoutes() {
     // 数据浏览
     svr_->Get("/api/data/browse", [this](const httplib::Request& req, httplib::Response& res) {
         std::string dirType = req.get_param_value("dir");
-        std::string dataDir;
-        if (dirType == "converted" || dirType == "转换") {
-            dataDir = convertOutputDir_;
-        } else {
-            dataDir = recordingState_.baseDir;
-        }
+        std::string dataDir = (dirType == "converted" || dirType == "转换")
+            ? getConvertOutputDir() : getRecordingBaseDir();
 
         std::string result = "{\"sessions\":[";
         if (winfs::dirExists(dataDir)) {
@@ -738,7 +797,8 @@ void HttpServer::setupRoutes() {
             return;
         }
 
-        std::string dataDir = (dirType == "converted") ? convertOutputDir_ : recordingState_.baseDir;
+        std::string dataDir = (dirType == "converted")
+            ? getConvertOutputDir() : getRecordingBaseDir();
         std::string sessionPath = dataDir + "/" + sessionId;
         if (!winfs::dirExists(sessionPath)) {
             json::sendJson(res, "{\"error\":\"session not found\"}");
@@ -816,7 +876,8 @@ void HttpServer::setupRoutes() {
                 json::sendJson(res, "{\"deleted\":false,\"error\":\"invalid sessionId\"}");
                 return;
             }
-            std::string baseDir = (dirType == "converted") ? convertOutputDir_ : recordingState_.baseDir;
+            std::string baseDir = (dirType == "converted")
+                ? getConvertOutputDir() : getRecordingBaseDir();
             delPath = baseDir + "/" + sessionIdFromBody;
         }
 
@@ -824,8 +885,8 @@ void HttpServer::setupRoutes() {
             json::sendJson(res, "{\"deleted\":false,\"error\":\"missing path\"}");
             return;
         }
-        std::string collectDir = recordingState_.baseDir;
-        std::string convertDir = convertOutputDir_;
+        std::string collectDir = getRecordingBaseDir();
+        std::string convertDir = getConvertOutputDir();
         delPath = winfs::resolvePath(delPath);
         collectDir = winfs::resolvePath(collectDir);
         convertDir = winfs::resolvePath(convertDir);
@@ -884,8 +945,8 @@ void HttpServer::setupRoutes() {
             res.set_content("Bad Request", "text/plain");
             return;
         }
-        std::string collectDir = recordingState_.baseDir;
-        std::string convertDir = convertOutputDir_;
+        std::string collectDir = getRecordingBaseDir();
+        std::string convertDir = getConvertOutputDir();
         if (filePath.find(collectDir) != 0 && filePath.find(convertDir) != 0) {
             res.status = 403;
             res.set_content("Forbidden", "text/plain");
@@ -931,6 +992,8 @@ void HttpServer::setupRoutes() {
     svr_->Get(".*", [this](const httplib::Request& req, httplib::Response& res) {
         std::string path = req.path;
         if (path == "/" || path.empty()) path = "/index.html";
+        // 旧版本和部分浏览器书签仍会访问 index_old.html，统一回落到当前控制台首页。
+        if (path == "/index_old.html") path = "/index.html";
         std::string filePath = frontendDir_ + path;
 
         if (filePath.find("..") != std::string::npos) {
@@ -956,6 +1019,8 @@ void HttpServer::setupRoutes() {
         else if (path.find(".png") != std::string::npos) contentType = "image/png";
         else if (path.find(".jpg") != std::string::npos || path.find(".jpeg") != std::string::npos) contentType = "image/jpeg";
         else if (path.find(".wasm") != std::string::npos) contentType = "application/wasm";
+        else if (path.find(".glb") != std::string::npos) contentType = "model/gltf-binary";
+        else if (path.find(".gltf") != std::string::npos) contentType = "model/gltf+json";
         else if (path.find(".data") != std::string::npos) contentType = "application/octet-stream";
         else if (path.find(".tflite") != std::string::npos) contentType = "application/octet-stream";
 
@@ -1105,14 +1170,14 @@ void HttpServer::setupMultiCameraRoutes() {
         }
 
         auto syncSlotPointer = [this](const std::string& slot) {
-            umiGrippers_[slot] = nullptr;
-            electricGrippers_[slot] = nullptr;
+            setUmiGripper(slot, nullptr);
+            setElectricGripper(slot, nullptr);
             auto* gs = deviceManager_->getGripperSlot(slot);
             if (!gs || !gs->connected || !gs->gripper) return;
             if (gs->gripperType == "manual") {
-                umiGrippers_[slot] = dynamic_cast<UmiGripper*>(gs->gripper.get());
+                setUmiGripper(slot, dynamic_cast<UmiGripper*>(gs->gripper.get()));
             } else if (gs->gripperType == "electric") {
-                electricGrippers_[slot] = dynamic_cast<ElectricGripper*>(gs->gripper.get());
+                setElectricGripper(slot, dynamic_cast<ElectricGripper*>(gs->gripper.get()));
             }
         };
         syncSlotPointer("left");
@@ -1140,7 +1205,94 @@ void HttpServer::setupMultiCameraRoutes() {
         json::sendJson(res, "{\"success\":false,\"error\":\"running camera swap is disabled; use the frontend display mapping\"}");
     });
 
-    // SLAM 位姿 API
+    // 双手视觉惯性位姿 API。映射由前端当前的相机/夹爪左右分配同步到后端。
+    auto handPoseJson = [](const HandPoseState& pose) {
+        std::ostringstream out;
+        out << std::boolalpha
+            << "{\"connected\":" << pose.connected
+            << ",\"cameraConnected\":" << pose.cameraConnected
+            << ",\"hasImu\":" << pose.hasImu
+            << ",\"hasVisual\":" << pose.hasVisual
+            << ",\"valid\":" << pose.valid
+            << ",\"timestampUs\":" << pose.timestampUs
+            << ",\"sampleCount\":" << pose.sampleCount
+            << ",\"position\":[" << pose.x << "," << pose.y << "," << pose.z << "]"
+            << ",\"quaternion\":[" << pose.qx << "," << pose.qy << "," << pose.qz << "," << pose.qw << "]"
+            << ",\"euler\":[" << pose.roll << "," << pose.pitch << "," << pose.yaw << "]"
+            << ",\"closure\":" << pose.closure
+            << ",\"quality\":" << pose.quality
+            << ",\"visualFeatures\":" << pose.visualFeatures
+            << ",\"stationary\":" << pose.stationary
+            << ",\"originRelocalized\":" << pose.originRelocalized
+            << ",\"cooperativeConstraint\":" << pose.cooperativeConstraint
+            << ",\"mode\":\"" << pose.mode << "\"}";
+        return out.str();
+    };
+
+    svr_->Get("/api/hand-poses", [this, handPoseJson](const httplib::Request&, httplib::Response& res) {
+        if (!handPoseManager_) {
+            json::sendJson(res, "{\"enabled\":false,\"hands\":{}}");
+            return;
+        }
+
+        HandPoseState left;
+        HandPoseState right;
+        handPoseManager_->getPose("left", left);
+        handPoseManager_->getPose("right", right);
+        HandPoseMapping leftMapping = handPoseManager_->getMapping("left");
+        HandPoseMapping rightMapping = handPoseManager_->getMapping("right");
+
+        std::ostringstream out;
+        out << std::boolalpha
+            << "{\"enabled\":" << handPoseManager_->isEnabled()
+            << ",\"coordinateFrame\":\"relative_start\""
+            << ",\"unit\":\"meter\""
+            << ",\"cooperative\":{\"available\":" << handPoseManager_->isCooperativeAvailable()
+            << ",\"active\":" << handPoseManager_->isCooperativeActive()
+            << ",\"mode\":\"dual_hand_zupt\"}"
+            << ",\"mappings\":{"
+            << "\"left\":{\"camera\":\"" << leftMapping.cameraSlot
+            << "\",\"gripper\":\"" << leftMapping.gripperSlot << "\"},"
+            << "\"right\":{\"camera\":\"" << rightMapping.cameraSlot
+            << "\",\"gripper\":\"" << rightMapping.gripperSlot << "\"}},"
+            << "\"hands\":{\"left\":" << handPoseJson(left)
+            << ",\"right\":" << handPoseJson(right) << "}}";
+        json::sendJson(res, out.str());
+    });
+
+    svr_->Post("/api/hand-poses/config", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!handPoseManager_) {
+            json::sendJson(res, "{\"success\":false,\"error\":\"pose manager unavailable\"}");
+            return;
+        }
+
+        HandPoseMapping left = handPoseManager_->getMapping("left");
+        HandPoseMapping right = handPoseManager_->getMapping("right");
+        const std::string leftCamera = json::extractStr(req.body, "leftCamera");
+        const std::string rightCamera = json::extractStr(req.body, "rightCamera");
+        const std::string leftGripper = json::extractStr(req.body, "leftGripper");
+        const std::string rightGripper = json::extractStr(req.body, "rightGripper");
+        handPoseManager_->setMapping("left",
+            leftCamera.empty() ? left.cameraSlot : leftCamera,
+            leftGripper.empty() ? left.gripperSlot : leftGripper);
+        handPoseManager_->setMapping("right",
+            rightCamera.empty() ? right.cameraSlot : rightCamera,
+            rightGripper.empty() ? right.gripperSlot : rightGripper);
+        json::sendJson(res, "{\"success\":true}");
+    });
+
+    svr_->Post("/api/hand-poses/reset", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!handPoseManager_) {
+            json::sendJson(res, "{\"success\":false,\"error\":\"pose manager unavailable\"}");
+            return;
+        }
+        std::string side = json::extractStr(req.body, "side");
+        if (side != "left" && side != "right") side = "all";
+        handPoseManager_->reset(side);
+        json::sendJson(res, "{\"success\":true}");
+    });
+
+    // 旧版单路 SLAM 位姿 API，继续保留给已有脚本使用。
     svr_->Get("/api/pose", [this](const httplib::Request&, httplib::Response& res) {
         std::lock_guard<std::mutex> lock(poseState_.mutex);
         char json[512];
@@ -1266,8 +1418,7 @@ void HttpServer::setupMultiCameraRoutes() {
         auto& gs = it->second;
         std::lock_guard<std::mutex> lock(gs.mutex);
         const char* linkType = "GCAN USBCAN";
-        auto git = electricGrippers_.find(slot);
-        ElectricGripper* gripper = (git != electricGrippers_.end()) ? git->second : nullptr;
+        ElectricGripper* gripper = getElectricGripper(slot);
         if (gripper && gripper->isSerialBridge()) linkType = "ESP32-CAN";
         char rawHex[48];
         rawHex[0] = '\0';
@@ -1300,8 +1451,7 @@ void HttpServer::setupMultiCameraRoutes() {
         std::string body = req.body;
 
         std::string action = json::extractStr(body, "action");
-        auto git = electricGrippers_.find(slot);
-        ElectricGripper* gripper = (git != electricGrippers_.end()) ? git->second : nullptr;
+        ElectricGripper* gripper = getElectricGripper(slot);
         if (!gripper && deviceManager_) {
             auto* gs = deviceManager_->getGripperSlot(slot);
             if (gs && gs->connected && gs->gripperType == "electric") {

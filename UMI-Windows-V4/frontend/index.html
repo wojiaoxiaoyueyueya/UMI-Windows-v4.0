@@ -44,6 +44,7 @@
             <button class="nav-tab" data-page="electric">电动夹爪控制</button>
             <button class="nav-tab" data-page="rps">剪刀石头布</button>
             <button class="nav-tab" data-page="teleop">夹爪遥控</button>
+            <button class="nav-tab" data-page="trajectory">空间位姿</button>
         </div>
     </nav>
 
@@ -1149,6 +1150,114 @@
         </div>
     </div>
 
+    <!-- Page: 左右手空间位姿 -->
+    <div class="page" id="page-trajectory" style="display:none">
+        <div class="trajectory-layout">
+            <aside class="trajectory-sidebar">
+                <div class="trajectory-side-header">
+                    <div>
+                        <h2>空间位姿</h2>
+                        <span id="trajectoryOverallState">等待设备</span>
+                    </div>
+                    <span class="trajectory-live-dot" id="trajectoryLiveDot"></span>
+                </div>
+
+                <section class="trajectory-side-section">
+                    <div class="trajectory-section-title">跟踪基准</div>
+                    <div class="trajectory-key-row"><span>坐标系</span><strong>各手独立起点</strong></div>
+                    <div class="trajectory-key-row"><span>位置单位</span><strong>米</strong></div>
+                    <div class="trajectory-key-row"><span>姿态表示</span><strong>XYZ / RPY</strong></div>
+                    <div class="trajectory-key-row"><span>双手协同</span><strong id="trajectoryCooperativeState">等待双手</strong></div>
+                </section>
+
+                <section class="trajectory-hand-status" id="trajectoryLeftStatus">
+                    <div class="trajectory-hand-heading">
+                        <span class="trajectory-hand-dot left"></span>
+                        <strong>左手夹爪</strong>
+                        <span id="trajectoryLeftMode">未接入</span>
+                    </div>
+                    <div class="trajectory-status-grid">
+                        <span>相机 <b id="trajectoryLeftCamera">--</b></span>
+                        <span>IMU <b id="trajectoryLeftImu">--</b></span>
+                        <span>特征 <b id="trajectoryLeftFeatures">--</b></span>
+                        <span>质量 <b id="trajectoryLeftQuality">--</b></span>
+                    </div>
+                </section>
+
+                <section class="trajectory-hand-status" id="trajectoryRightStatus">
+                    <div class="trajectory-hand-heading">
+                        <span class="trajectory-hand-dot right"></span>
+                        <strong>右手夹爪</strong>
+                        <span id="trajectoryRightMode">未接入</span>
+                    </div>
+                    <div class="trajectory-status-grid">
+                        <span>相机 <b id="trajectoryRightCamera">--</b></span>
+                        <span>IMU <b id="trajectoryRightImu">--</b></span>
+                        <span>特征 <b id="trajectoryRightFeatures">--</b></span>
+                        <span>质量 <b id="trajectoryRightQuality">--</b></span>
+                    </div>
+                </section>
+
+                <section class="trajectory-side-section trajectory-controls">
+                    <div class="trajectory-section-title">显示控制</div>
+                    <label class="trajectory-slider-label" for="trajectoryTrailLength">
+                        <span>轨迹长度</span><b id="trajectoryTrailLengthValue">600</b>
+                    </label>
+                    <input type="range" id="trajectoryTrailLength" min="100" max="1500" step="50" value="600">
+                    <label class="trajectory-slider-label" for="trajectoryPositionScale">
+                        <span>轨迹显示倍率</span><b id="trajectoryPositionScaleValue">3×</b>
+                    </label>
+                    <input type="range" id="trajectoryPositionScale" min="1" max="8" step="0.5" value="3">
+                    <label class="trajectory-check"><input type="checkbox" id="trajectoryGridToggle" checked><span>显示网格</span></label>
+                    <label class="trajectory-check"><input type="checkbox" id="trajectoryModelToggle" checked><span>显示夹爪模型</span></label>
+                    <div class="trajectory-button-row">
+                        <button class="eg-btn eg-btn-outline" id="trajectoryFitBtn" type="button">适配视图</button>
+                        <button class="eg-btn eg-btn-primary" id="trajectoryResetBtn" type="button">重置原点</button>
+                    </div>
+                </section>
+            </aside>
+
+            <main class="trajectory-main">
+                <header class="trajectory-toolbar">
+                    <div>
+                        <strong>视觉 + IMU 相对轨迹</strong>
+                        <span id="trajectoryFrameLabel">等待跟踪数据</span>
+                    </div>
+                    <div class="trajectory-toolbar-badges">
+                        <span class="trajectory-badge left" id="trajectoryLeftBadge">左手未接入</span>
+                        <span class="trajectory-badge right" id="trajectoryRightBadge">右手未接入</span>
+                    </div>
+                </header>
+
+                <section class="trajectory-stage">
+                    <div id="trajectoryViewport" class="trajectory-viewport"></div>
+                    <div class="trajectory-empty" id="trajectoryEmpty">等待手动夹爪与对应相机接入</div>
+                    <div class="trajectory-legend">
+                        <span><i class="left"></i>左手轨迹</span>
+                        <span><i class="right"></i>右手轨迹</span>
+                    </div>
+                </section>
+
+                <footer class="trajectory-readout-wrap">
+                    <section class="trajectory-readout" id="trajectoryLeftReadout">
+                        <div class="trajectory-readout-head"><span class="trajectory-hand-dot left"></span><strong>左手</strong><b id="trajectoryLeftClosure">--</b></div>
+                        <div class="trajectory-readout-values">
+                            <span>XYZ <b id="trajectoryLeftPosition">--</b></span>
+                            <span>RPY <b id="trajectoryLeftRotation">--</b></span>
+                        </div>
+                    </section>
+                    <section class="trajectory-readout" id="trajectoryRightReadout">
+                        <div class="trajectory-readout-head"><span class="trajectory-hand-dot right"></span><strong>右手</strong><b id="trajectoryRightClosure">--</b></div>
+                        <div class="trajectory-readout-values">
+                            <span>XYZ <b id="trajectoryRightPosition">--</b></span>
+                            <span>RPY <b id="trajectoryRightRotation">--</b></span>
+                        </div>
+                    </section>
+                </footer>
+            </main>
+        </div>
+    </div>
+
     <!-- Toast notification -->
     <div class="toast" id="toast"></div>
 
@@ -1176,7 +1285,9 @@
             </div>
         </div>
     </div>
+    <script src="/service-lifecycle.js?v=20260826process"></script>
+    <script src="/lib/mediapipe/hands.js"></script>
+    <script src="/script.js?v=20260826pose"></script>
+    <script src="/trajectory3d.bundle.js?v=20260826pose"></script>
 </body>
-<script src="/lib/mediapipe/hands.js"></script>
-<script src="/script.js?v=20260602deviceonly"></script>
 </html>

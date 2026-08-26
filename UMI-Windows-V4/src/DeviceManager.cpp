@@ -8,6 +8,7 @@
 #include "UmiGripper.hpp"
 #include "ElectricGripper.hpp"
 #include "ECanVciWrapper.hpp"
+#include "utils/JsonHelper.hpp"
 #include "utils/WinFsUtils.hpp"
 
 #include <cstdio>
@@ -84,7 +85,49 @@ DeviceManager::DeviceManager(const Config& cfg) : cfg_(cfg) {
     gripperSlots_["extra"] = GripperSlot("extra");
 }
 
-DeviceManager::~DeviceManager() = default;
+DeviceManager::~DeviceManager() { shutdown(); }
+
+void DeviceManager::shutdown() {
+    std::lock_guard<std::mutex> lock(detectedInfoMutex_);
+    if (shutdownCompleted_) return;
+    shutdownCompleted_ = true;
+
+    fprintf(stderr, "[DeviceManager] 正在释放相机、串口和 CAN 设备...\n");
+    for (auto& kv : slots_) {
+        auto& slot = kv.second;
+        if (slot.camera) {
+            slot.camera->stopStreaming();
+            slot.camera->close();
+            slot.camera.reset();
+        }
+        slot.connected = false;
+        slot.deviceType = "none";
+    }
+    for (auto& camera : retiredCameras_) {
+        if (camera) {
+            camera->stopStreaming();
+            camera->close();
+        }
+    }
+    retiredCameras_.clear();
+
+    for (auto& kv : gripperSlots_) {
+        auto& slot = kv.second;
+        if (slot.gripper) {
+            slot.gripper->close();
+            slot.gripper.reset();
+        }
+        slot.connected = false;
+        slot.gripperType = "none";
+    }
+    for (auto& gripper : retiredGrippers_) {
+        if (gripper) gripper->close();
+    }
+    retiredGrippers_.clear();
+    detectedDevices_.clear();
+    detectedGrippers_.clear();
+    fprintf(stderr, "[DeviceManager] 所有设备句柄已释放\n");
+}
 
 // ---- 设备检测 ----
 
@@ -347,11 +390,16 @@ bool DeviceManager::refreshDetectedGrippers() {
     // 如果槽位里已经有电动夹爪，必须确认最近收到过 CAN 反馈才报告给前端。
     // 否则 CAN 断开后软件连接标志仍可能保持 true，页面会误显示“有设备”。
     for (auto& kv : gripperSlots_) {
-        const auto& slot = kv.second;
+        auto& slot = kv.second;
         auto* electric = dynamic_cast<ElectricGripper*>(slot.gripper.get());
         if (slot.connected && slot.gripperType == "electric" && electric && electric->isConnected()) {
             bool recentlyResponsive = electric->hasRecentMotorResponse(nowUs, 5000000ULL);
-            if (!recentlyResponsive) continue;
+            if (!recentlyResponsive) {
+                fprintf(stderr, "[DeviceManager] %s 电动夹爪反馈超时，标记为断开 (%s)\n",
+                        kv.first.c_str(), electric->getPortName().c_str());
+                slot.connected = false;
+                continue;
+            }
 
             DetectedGripper dg;
             dg.type = "electric";
@@ -425,6 +473,10 @@ bool DeviceManager::attachDetectedGrippersToEmptySlots(bool allowElectricScan) {
 
         UmiGripper* gripper = dynamic_cast<UmiGripper*>(slot.gripper.get());
         if (!gripper) {
+            if (slot.gripper) {
+                slot.gripper->close();
+                retiredGrippers_.push_back(std::move(slot.gripper));
+            }
             auto fresh = std::make_unique<UmiGripper>();
             gripper = fresh.get();
             slot.gripper = std::move(fresh);
@@ -467,9 +519,14 @@ bool DeviceManager::attachDetectedGrippersToEmptySlots(bool allowElectricScan) {
             targetSide = detectedSide;
         }
 
-        gripperSlots_[targetSide].gripperType = "manual";
-        gripperSlots_[targetSide].gripper = std::move(gripper);
-        gripperSlots_[targetSide].connected = true;
+        auto& targetSlot = gripperSlots_[targetSide];
+        if (targetSlot.gripper) {
+            targetSlot.gripper->close();
+            retiredGrippers_.push_back(std::move(targetSlot.gripper));
+        }
+        targetSlot.gripperType = "manual";
+        targetSlot.gripper = std::move(gripper);
+        targetSlot.connected = true;
 
         DetectedGripper dg;
         dg.type = "manual";
@@ -553,9 +610,14 @@ bool DeviceManager::attachDetectedGrippersToEmptySlots(bool allowElectricScan) {
             dg.port = gripper->getPortName();
             dg.connected = true;
             detectedGrippers_.push_back(dg);
-            gripperSlots_[electricSlot].gripperType = "electric";
-            gripperSlots_[electricSlot].gripper = std::move(gripper);
-            gripperSlots_[electricSlot].connected = true;
+            auto& targetSlot = gripperSlots_[electricSlot];
+            if (targetSlot.gripper) {
+                targetSlot.gripper->close();
+                retiredGrippers_.push_back(std::move(targetSlot.gripper));
+            }
+            targetSlot.gripperType = "electric";
+            targetSlot.gripper = std::move(gripper);
+            targetSlot.connected = true;
             fprintf(stderr, "[DeviceManager] 热插拔补挂 %s 夹爪槽: 电动夹爪 (GCAN CAN盒)\n", electricSlot.c_str());
             changed = true;
             electricAttached = true;
@@ -575,9 +637,14 @@ bool DeviceManager::attachDetectedGrippersToEmptySlots(bool allowElectricScan) {
             dg.port = gripper->getPortName();
             dg.connected = true;
             detectedGrippers_.push_back(dg);
-            gripperSlots_[electricSlot].gripperType = "electric";
-            gripperSlots_[electricSlot].gripper = std::move(gripper);
-            gripperSlots_[electricSlot].connected = true;
+            auto& targetSlot = gripperSlots_[electricSlot];
+            if (targetSlot.gripper) {
+                targetSlot.gripper->close();
+                retiredGrippers_.push_back(std::move(targetSlot.gripper));
+            }
+            targetSlot.gripperType = "electric";
+            targetSlot.gripper = std::move(gripper);
+            targetSlot.connected = true;
             fprintf(stderr, "[DeviceManager] 热插拔补挂 %s 夹爪槽: 电动夹爪 (ESP32-CAN 串口桥 %s)\n",
                     electricSlot.c_str(), port.c_str());
             changed = true;
@@ -917,103 +984,6 @@ std::vector<std::string> DeviceManager::getSlotNames() const {
     return names;
 }
 
-// ---- 槽位操作 ----
-
-bool DeviceManager::swapSlots(const std::string& pos1, const std::string& pos2) {
-    auto it1 = slots_.find(pos1);
-    auto it2 = slots_.find(pos2);
-    if (it1 == slots_.end() || it2 == slots_.end()) return false;
-
-    // 停止现有流
-    if (it1->second.connected && it1->second.camera) it1->second.camera->stopStreaming();
-    if (it2->second.connected && it2->second.camera) it2->second.camera->stopStreaming();
-
-    std::swap(it1->second.deviceType, it2->second.deviceType);
-    std::swap(it1->second.camera, it2->second.camera);
-    std::swap(it1->second.connected, it2->second.connected);
-
-    if (it1->second.connected && it1->second.camera) it1->second.camera->startStreaming();
-    if (it2->second.connected && it2->second.camera) it2->second.camera->startStreaming();
-
-    fprintf(stderr, "[DeviceManager] 已交换 %s/%s 槽位\n", pos1.c_str(), pos2.c_str());
-    return true;
-}
-
-bool DeviceManager::assignCamera(const std::string& serial, const std::string& targetSlot) {
-    // 策略：将指定 serial 的摄像头移到 targetSlot，
-    // 然后把剩余的摄像头按顺序分配给 left、right
-
-    if (slots_.find(targetSlot) == slots_.end()) return false;
-
-    // 收集所有已分配到槽位的摄像头，先停止流
-    struct SlotCam { std::string slot; std::string serial; std::string type;
-                     std::unique_ptr<ICamera> cam; bool connected; };
-    std::vector<SlotCam> cams;
-    for (auto& kv : slots_) {
-        if (kv.second.connected && kv.second.camera) {
-            kv.second.camera->stopStreaming();
-            cams.push_back({kv.first, kv.second.camera->getSerialNumber(),
-                            kv.second.deviceType, std::move(kv.second.camera), kv.second.connected});
-        }
-        kv.second.connected = false;
-        kv.second.camera.reset();
-        kv.second.deviceType.clear();
-    }
-
-    // 找到目标 serial 的摄像头
-    SlotCam* targetCam = nullptr;
-    for (auto& c : cams) {
-        if (c.serial == serial) { targetCam = &c; break; }
-    }
-    if (!targetCam) {
-        fprintf(stderr, "[DeviceManager] 未找到序列号 %s 的摄像头\n", serial.c_str());
-        // 恢复原来的分配
-        for (auto& c : cams) {
-            auto& slot = slots_[c.slot];
-            slot.deviceType = c.type;
-            slot.camera = std::move(c.cam);
-            slot.connected = c.connected;
-            if (slot.connected && slot.camera) slot.camera->startStreaming();
-        }
-        return false;
-    }
-
-    // 把目标摄像头分配到 targetSlot
-    auto& tSlot = slots_[targetSlot];
-    tSlot.deviceType = targetCam->type;
-    tSlot.camera = std::move(targetCam->cam);
-    tSlot.connected = targetCam->connected;
-    targetCam->slot = targetSlot; // 标记已用
-
-    // 剩余摄像头分配给 left、right
-    std::vector<std::string> freeSlots = {"left", "right"};
-    for (auto& c : cams) {
-        if (c.slot == targetSlot) continue; // 已分配到 targetSlot
-        // 找一个空的 slot
-        for (auto& fs : freeSlots) {
-            if (fs == targetSlot) continue;
-            auto& slot = slots_[fs];
-            if (!slot.connected) {
-                slot.deviceType = c.type;
-                slot.camera = std::move(c.cam);
-                slot.connected = c.connected;
-                break;
-            }
-        }
-    }
-
-    // 启动所有流
-    for (auto& kv : slots_) {
-        if (kv.second.connected && kv.second.camera) {
-            kv.second.camera->startStreaming();
-            fprintf(stderr, "[DeviceManager] %s 槽: %s (SN: %s)\n",
-                    kv.first.c_str(), kv.second.deviceType.c_str(),
-                    kv.second.camera->getSerialNumber().c_str());
-        }
-    }
-    return true;
-}
-
 // ---- 夹爪 ----
 
 GripperSlot* DeviceManager::getGripperSlot(const std::string& position) {
@@ -1305,8 +1275,9 @@ std::string DeviceManager::toJson() const {
     for (size_t i = 0; i < detectedDevices_.size(); i++) {
         auto& d = detectedDevices_[i];
         if (i > 0) json += ",";
-        json += "{\"type\":\"" + d.type + "\",\"name\":\"" + d.name +
-                "\",\"serial\":\"" + d.serialNumber + "\"}";
+        json += "{\"type\":\"" + ::json::escape(d.type) + "\",\"name\":\"" +
+                ::json::escape(d.name) + "\",\"serial\":\"" +
+                ::json::escape(d.serialNumber) + "\"}";
     }
     json += "],\"slots\":{";
     bool first = true;
@@ -1325,11 +1296,11 @@ std::string DeviceManager::toJson() const {
                 slotConnected = !slotSerial.empty() && detectedCameraSerials.count(slotSerial) > 0;
             }
         }
-        json += "\"" + kv.first + "\":{\"type\":\"" + kv.second.deviceType +
+        json += "\"" + kv.first + "\":{\"type\":\"" + ::json::escape(kv.second.deviceType) +
                 "\",\"connected\":" + (slotConnected ? "true" : "false");
         if (slotConnected && kv.second.camera) {
-            json += ",\"name\":\"" + kv.second.camera->getDeviceName() +
-                    "\",\"serial\":\"" + slotSerial + "\"";
+            json += ",\"name\":\"" + ::json::escape(kv.second.camera->getDeviceName()) +
+                    "\",\"serial\":\"" + ::json::escape(slotSerial) + "\"";
             json += ",\"hasDepth\":" + std::string(kv.second.camera->hasDepthStream() ? "true" : "false");
             json += ",\"hasIMU\":false";
             json += ",\"hasIR\":" + std::string(kv.second.camera->hasIRStream() ? "true" : "false");
@@ -1340,7 +1311,8 @@ std::string DeviceManager::toJson() const {
     for (size_t i = 0; i < detectedGrippers_.size(); i++) {
         if (i > 0) json += ",";
         auto& g = detectedGrippers_[i];
-        json += "{\"type\":\"" + g.type + "\",\"port\":\"" + g.port +
+        json += "{\"type\":\"" + ::json::escape(g.type) + "\",\"port\":\"" +
+                ::json::escape(g.port) +
                 "\",\"connected\":" + (g.connected ? "true" : "false") + "}";
     }
     json += "],\"gripperSlots\":{";
@@ -1360,10 +1332,10 @@ std::string DeviceManager::toJson() const {
                     && electric->hasRecentMotorResponse(nowUs, 5000000ULL);
             }
         }
-        json += "\"" + kv.first + "\":{\"type\":\"" + kv.second.gripperType +
+        json += "\"" + kv.first + "\":{\"type\":\"" + ::json::escape(kv.second.gripperType) +
                 "\",\"connected\":" + (gripperConnected ? "true" : "false");
         if (gripperConnected && kv.second.gripper) {
-            json += ",\"port\":\"" + gripperPort + "\"";
+            json += ",\"port\":\"" + ::json::escape(gripperPort) + "\"";
         }
         json += "}";
     }

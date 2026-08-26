@@ -121,13 +121,19 @@ function Copy-ApplicationRuntime {
 }
 
 function Copy-ProjectAssets {
-    foreach ($directory in @("frontend", "tools", "docs")) {
+    foreach ($directory in @("frontend", "docs")) {
         Copy-Item -LiteralPath (Join-Path $projectRoot $directory) -Destination (Join-Path $stageRoot $directory) -Recurse
+    }
+    $stageTools = Join-Path $stageRoot "tools"
+    [System.IO.Directory]::CreateDirectory($stageTools) | Out-Null
+    foreach ($tool in @("convert_to_hdf5.py", "convert_to_lerobot.py", "convert_to_rlds.py")) {
+        Copy-Item -LiteralPath (Join-Path $projectRoot "tools\$tool") -Destination $stageTools
     }
     foreach ($file in @("config.json", "requirements.txt", "README.md", "CHANGELOG.md", "VERSION")) {
         Copy-Item -LiteralPath (Join-Path $projectRoot $file) -Destination (Join-Path $stageRoot $file)
     }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "StartUMI.vbs") -Destination $stageRoot
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "StopUMI.vbs") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "StartUMI.cmd") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "README-install.txt") -Destination $stageRoot
     $driversRoot = Join-Path $stageRoot "drivers"
@@ -146,6 +152,39 @@ function Copy-ProjectAssets {
     }
     [System.IO.Directory]::CreateDirectory((Join-Path $stageRoot "data_capture")) | Out-Null
     [System.IO.Directory]::CreateDirectory((Join-Path $stageRoot "data_converted")) | Out-Null
+}
+
+function Find-HostPythonWithPip {
+    $versionParts = $PythonVersion.Split('.')
+    $majorMinor = if ($versionParts.Count -ge 2) {
+        $versionParts[0] + "." + $versionParts[1]
+    } else {
+        "3"
+    }
+
+    $pyLauncher = Get-Command "py.exe" -ErrorAction SilentlyContinue
+    if ($pyLauncher) {
+        $probeOutput = & $pyLauncher.Source "-$majorMinor" -m pip --version 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            return [pscustomobject]@{
+                Executable = $pyLauncher.Source
+                PrefixArguments = @("-$majorMinor")
+                Description = "py -$majorMinor"
+            }
+        }
+    }
+
+    foreach ($candidate in @(Get-Command "python.exe" -All -ErrorAction SilentlyContinue)) {
+        $probeOutput = & $candidate.Source -m pip --version 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            return [pscustomobject]@{
+                Executable = $candidate.Source
+                PrefixArguments = @()
+                Description = $candidate.Source
+            }
+        }
+    }
+    throw "Python $majorMinor with pip was not found. Install Python and enable the Windows py launcher."
 }
 
 function Install-EmbeddedPython {
@@ -173,12 +212,43 @@ function Install-EmbeddedPython {
         "import site"
     ) | Set-Content -LiteralPath $pthFile.FullName -Encoding Ascii
 
-    & python -m pip install --disable-pip-version-check --no-compile --upgrade `
-        --target $sitePackages -r (Join-Path $projectRoot "requirements.txt")
+    $pipArguments = @($hostPython.PrefixArguments) + @(
+        "-m", "pip", "install", "--disable-pip-version-check", "--no-compile", "--upgrade",
+        "--target", $sitePackages, "-r", (Join-Path $projectRoot "requirements.txt")
+    )
+    & $hostPython.Executable @pipArguments
     if ($LASTEXITCODE -ne 0) { throw "Failed to install embedded Python dependencies" }
 
     & (Join-Path $pythonRoot "python.exe") -c "import numpy, pyarrow, h5py; print('Embedded Python dependencies OK')"
     if ($LASTEXITCODE -ne 0) { throw "Embedded Python validation failed" }
+
+    # 运行时只执行数据转换，不需要第三方包的测试源码、缓存和字节码。
+    # 清理这些文件可显著减小安装包，同时保留包本身、许可证和二进制扩展。
+    $sitePackagesFullPath = [System.IO.Path]::GetFullPath($sitePackages).TrimEnd('\') + '\'
+    $unusedDirectories = @(
+        Get-ChildItem -LiteralPath $sitePackages -Directory -Recurse -Force |
+            Where-Object { $_.Name -in @("tests", "test", "__pycache__") } |
+            Sort-Object { $_.FullName.Length } -Descending
+    )
+    foreach ($directory in $unusedDirectories) {
+        $directoryFullPath = [System.IO.Path]::GetFullPath($directory.FullName)
+        if (-not $directoryFullPath.StartsWith($sitePackagesFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to clean a Python directory outside site-packages: $directoryFullPath"
+        }
+        if ([System.IO.Directory]::Exists($directoryFullPath)) {
+            [System.IO.Directory]::Delete($directoryFullPath, $true)
+        }
+    }
+    Get-ChildItem -LiteralPath $sitePackages -File -Recurse -Filter "*.pyc" -Force |
+        ForEach-Object { [System.IO.File]::Delete($_.FullName) }
+
+    $remainingUnusedDirectories = @(
+        Get-ChildItem -LiteralPath $sitePackages -Directory -Recurse -Force |
+            Where-Object { $_.Name -in @("tests", "test", "__pycache__") }
+    )
+    if ($remainingUnusedDirectories.Count -ne 0) {
+        throw "Embedded Python cleanup failed: $($remainingUnusedDirectories.Count) test/cache directories remain"
+    }
 }
 
 function Find-InnoCompiler {
@@ -194,6 +264,9 @@ function Find-InnoCompiler {
     throw "Inno Setup 6 was not found. Install: winget install --id JRSoftware.InnoSetup -e"
 }
 
+$hostPython = Find-HostPythonWithPip
+Write-Output ("Host Python for packaging: {0}" -f $hostPython.Description)
+
 Reset-StageDirectory
 Copy-ApplicationRuntime
 Copy-ProjectAssets
@@ -202,6 +275,7 @@ Install-EmbeddedPython
 
 $requiredStageFiles = @(
     "build\ManualGripper.exe",
+    "StopUMI.vbs",
     "build\MvCameraControl.dll",
     "build\MvUsb3vTL.dll",
     "build\ippi.dll",
@@ -211,7 +285,11 @@ $requiredStageFiles = @(
     "drivers\gcan_canfd\USBCANFD.inf",
     "drivers\ch341\CH341SER.INF",
     "runtime\python\python.exe",
-    "tools\convert_to_rlds.py"
+    "tools\convert_to_rlds.py",
+    "frontend\trajectory3d.bundle.js",
+    "frontend\assets\models\umi-gripper.glb",
+    "frontend\lib\three\three.module.min.js",
+    "frontend\lib\three\LICENSE"
 )
 foreach ($relativePath in $requiredStageFiles) {
     $requiredPath = Join-Path $stageRoot $relativePath
