@@ -26,8 +26,12 @@ constexpr int kGyroBiasBootstrapSamples = 20;
 constexpr double kGyroBiasLearningRate = 0.006;
 constexpr double kVisualRotationMinFlowPx = 1.10;
 constexpr double kVisualRotationMaxDeg = 20.0;
-constexpr double kMinimumVisualImuTranslation = 0.0015;
+constexpr double kMinimumVisualImuTranslation = 0.00015;
 constexpr double kMaximumVisualImuTranslation = 0.035;
+constexpr double kVisualTranslationMinFlowPx = 1.05;
+constexpr double kNominalVisualDepthM = 0.28;
+constexpr double kMaximumVisualTranslationPerFrameM = 0.018;
+constexpr size_t kMaximumSparseVisualPoints = 96;
 constexpr int kOriginRelocalizeHoldFrames = 3;
 
 double clampValue(double value, double low, double high) {
@@ -63,6 +67,38 @@ double median(std::vector<double>& values) {
     return values[middle];
 }
 
+std::vector<std::array<float, 3>> buildSparseVisualCloud(
+        const std::vector<cv::Point2f>& points,
+        int width,
+        int height,
+        double focal) {
+    std::vector<std::array<float, 3>> cloud;
+    if (points.empty() || width <= 0 || height <= 0 || focal <= 1.0) return cloud;
+
+    const size_t stride = std::max<size_t>(1,
+        (points.size() + kMaximumSparseVisualPoints - 1) / kMaximumSparseVisualPoints);
+    cloud.reserve(std::min(points.size(), kMaximumSparseVisualPoints));
+    const double centerX = width * 0.5;
+    const double centerY = height * 0.5;
+    for (size_t index = 0; index < points.size() && cloud.size() < kMaximumSparseVisualPoints;
+         index += stride) {
+        const cv::Point2f& point = points[index];
+        // 单目特征没有可靠的绝对深度。使用像素位置生成稳定的分层深度，保留
+        // 真实图像中的射线方向，并在页面中形成由相机向外展开的稀疏视锥。
+        const double phase = std::fmod(
+            std::fabs(point.x * 0.61803398875 + point.y * 0.38196601125), 29.0) / 29.0;
+        const double depth = 0.10 + phase * 0.30;
+        const double normalizedX = (point.x - centerX) / focal;
+        const double normalizedY = (point.y - centerY) / focal;
+        cloud.push_back({
+            static_cast<float>(normalizedX * depth * 1.8),
+            static_cast<float>(-normalizedY * depth * 1.8),
+            static_cast<float>(depth)
+        });
+    }
+    return cloud;
+}
+
 }  // namespace
 
 class HandPoseManager::Tracker {
@@ -82,6 +118,7 @@ public:
             state_.cameraConnected = connected;
             if (!connected) {
                 state_.hasVisual = false;
+                state_.visualPointCloud.clear();
                 state_.quality = state_.hasImu ? 0.25f : 0.0f;
                 state_.mode = state_.connected ? "imu" : "offline";
                 visualStationary_ = false;
@@ -274,7 +311,9 @@ public:
         if (gravityInitialized_) {
             const Eigen::Vector3d predictedGravity = orientation_.inverse() * Eigen::Vector3d::UnitZ();
             // measured x predicted 才会把估计姿态拉向实测重力；原方向相反会造成静止后仰。
-            const double correctionGain = imuStationary_ ? 1.8 : 0.32;
+            // 静止时快速拉回重力方向，抑制模型缓慢后仰；运动时降低增益，避免
+            // 将线性加速度错误解释成姿态变化。偏航仍由陀螺仪和视觉共同约束。
+            const double correctionGain = imuStationary_ ? 3.6 : 0.32;
             gyro += filteredGravityBody_.cross(predictedGravity) * correctionGain;
         }
 
@@ -448,9 +487,13 @@ private:
             }
 
             const double medianFlow = median(flows);
+            const double focal = std::max(gray.cols, gray.rows) * 0.92;
+            std::vector<std::array<float, 3>> sparseVisualCloud =
+                buildSparseVisualCloud(trackedCurrent, gray.cols, gray.rows, focal);
             bool locallyStationary = false;
             {
                 std::lock_guard<std::mutex> lock(stateMutex_);
+                state_.visualPointCloud = sparseVisualCloud;
                 const bool visuallyStill = trackedCurrent.size() >= 30
                     && medianFlow <= kVisualStationaryFlowPx;
                 if (visuallyStill) {
@@ -547,7 +590,6 @@ private:
             bool visualUpdated = false;
             int inlierCount = 0;
             if (trackedPrevious.size() >= 30) {
-                const double focal = std::max(gray.cols, gray.rows) * 0.92;
                 const cv::Point2d principal(gray.cols * 0.5, gray.rows * 0.5);
                 cv::Mat inlierMask;
                 cv::Mat essential = cv::findEssentialMat(
@@ -602,20 +644,29 @@ private:
 
                         Eigen::Vector3d imuDelta = pendingImuDelta_;
                         pendingImuDelta_.setZero();
-                        double scale = imuDelta.norm();
+                        const double imuScale = imuDelta.norm();
+                        const double visualScale = clampValue(
+                            medianFlow / focal * kNominalVisualDepthM,
+                            0.0, kMaximumVisualTranslationPerFrameM);
+                        double scale = imuScale;
                         if (cooperativeConstraint_.load() || locallyStationary || originRelocalizedNow) {
                             // 单手静止即可冻结位置；双手约束用于进一步提高静止判定可信度。
                             scale = 0.0;
                             velocity_.setZero();
-                        } else if (medianFlow >= 1.0
-                                   && scale >= kMinimumVisualImuTranslation
-                                   && scale <= kMaximumVisualImuTranslation) {
+                        } else if (medianFlow >= kVisualTranslationMinFlowPx
+                                   && imuScale >= kMinimumVisualImuTranslation
+                                   && imuScale <= kMaximumVisualImuTranslation) {
                             if (visualDirection.dot(imuDelta) < 0.0) visualDirection = -visualDirection;
                             Eigen::Vector3d fusedDirection = visualDirection * 0.60 + imuDelta.normalized() * 0.40;
                             if (fusedDirection.norm() > 1e-8) visualDirection = fusedDirection.normalized();
+                            // IMU 提供米制尺度，视觉光流补足低速移动时被积分死区吞掉的位移。
+                            scale = clampValue(imuScale * 0.65 + visualScale * 0.35,
+                                               0.0, kMaximumVisualTranslationPerFrameM);
+                        } else if (medianFlow >= kVisualTranslationMinFlowPx) {
+                            // 匀速或缓慢移动时加速度接近零，纯 IMU 无法给出尺度。此时采用
+                            // 保守名义工作距离恢复相对位移；静止门限会阻止纹理噪声累积。
+                            scale = visualScale * 0.72;
                         } else {
-                            // 单目视觉没有绝对尺度，缺少可信 IMU 位移时只更新方向/姿态，
-                            // 不再根据假定景深凭空生成距离。
                             scale = 0.0;
                         }
 

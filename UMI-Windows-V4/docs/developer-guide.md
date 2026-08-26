@@ -442,7 +442,7 @@ npx --yes esbuild@0.25.9 frontend/trajectory3d.js --bundle --format=iife --platf
 9. 视频时长与统一时间戳一致。
 10. LeRobot、HDF5、RLDS 至少执行目标格式的最小转换测试。
 11. Edge/Chrome 页面无明显遮挡、控制台异常或资源 404。
-12. 空间位姿页只显示已连接夹爪，左右交换正确，旋转/缩放/动态取景可用，模型完全闭合、显示倍率、双手协同状态和 `pose_data/trajectory.csv` 正常。
+12. 空间位姿页只显示已连接夹爪，左右交换正确，模型可平移和旋转，完整闭合、相机视锥、稀疏点云开关、动态取景、双手协同状态和 `pose_data/trajectory.csv` 正常。
 
 没有连接对应硬件时，应在提交说明中明确写出未覆盖的实机测试项。
 

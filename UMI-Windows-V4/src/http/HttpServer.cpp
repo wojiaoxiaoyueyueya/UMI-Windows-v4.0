@@ -164,7 +164,9 @@ bool HttpServer::shouldShutdownForClientLifecycle() {
     if (!clientTrackingStarted_) return false;
 
     const auto now = std::chrono::steady_clock::now();
-    const auto staleAfter = std::chrono::seconds(120);
+    // 正常关页会主动 release，并在 3 秒宽限后退出。浏览器被强制结束时收不到
+    // pagehide/beforeunload，因此以三个心跳周期作为兜底，避免设备继续占用两分钟。
+    const auto staleAfter = std::chrono::seconds(15);
     for (auto it = releasedClients_.begin(); it != releasedClients_.end();) {
         if (now - it->second > std::chrono::seconds(15)) {
             it = releasedClients_.erase(it);

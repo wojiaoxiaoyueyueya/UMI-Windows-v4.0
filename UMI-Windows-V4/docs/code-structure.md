@@ -40,7 +40,7 @@
 | `frontend/dashboard.js` | 数据看板逻辑，读取历史会话、转换结果、删除数据。 |
 | `frontend/dashboard.css` | 数据看板样式。 |
 | `frontend/script.js` | 采集控制台逻辑，包括设备状态、视频流、录制、转换、夹爪控制、剪刀石头布和槽位映射同步。 |
-| `frontend/trajectory3d.js` | 空间位姿页的 Three.js 源码、轨迹倍率与动态取景、模型加载、交互控制和闭合动画。 |
+| `frontend/trajectory3d.js` | 空间位姿页的 Three.js 源码、轨迹倍率、夹爪与相机模型、稀疏点云、交互控制和闭合动画。 |
 | `frontend/trajectory3d.bundle.js` | 已打包的离线三维运行脚本，普通用户不需要 Node.js。 |
 | `frontend/assets/models/umi-gripper.glb` | 浏览器运行时使用的手动夹爪三维模型。 |
 | `frontend/style.css` | 采集控制台样式。 |

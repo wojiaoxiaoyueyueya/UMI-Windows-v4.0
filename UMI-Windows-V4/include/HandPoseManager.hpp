@@ -3,6 +3,7 @@
 #include "IGripper.hpp"
 
 #include <atomic>
+#include <array>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -11,6 +12,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -40,6 +42,9 @@ struct HandPoseState {
     float closure = 0.0f;
     float quality = 0.0f;
     int visualFeatures = 0;
+    // 相机局部坐标系中的稀疏视觉点，单位为米。单目相机没有绝对深度，
+    // z 使用视觉运动和名义工作距离构建，仅用于展示特征分布与视锥。
+    std::vector<std::array<float, 3>> visualPointCloud;
     bool stationary = false;
     bool originRelocalized = false;
     bool cooperativeConstraint = false;

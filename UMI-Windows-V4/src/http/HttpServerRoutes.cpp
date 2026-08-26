@@ -1222,6 +1222,13 @@ void HttpServer::setupMultiCameraRoutes() {
             << ",\"closure\":" << pose.closure
             << ",\"quality\":" << pose.quality
             << ",\"visualFeatures\":" << pose.visualFeatures
+            << ",\"visualPointCloud\":[";
+        for (size_t index = 0; index < pose.visualPointCloud.size(); ++index) {
+            if (index != 0) out << ',';
+            const auto& point = pose.visualPointCloud[index];
+            out << '[' << point[0] << ',' << point[1] << ',' << point[2] << ']';
+        }
+        out << ']'
             << ",\"stationary\":" << pose.stationary
             << ",\"originRelocalized\":" << pose.originRelocalized
             << ",\"cooperativeConstraint\":" << pose.cooperativeConstraint

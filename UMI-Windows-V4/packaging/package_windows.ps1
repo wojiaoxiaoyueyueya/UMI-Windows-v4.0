@@ -1,4 +1,4 @@
-# Build a self-contained Windows x64 installer.
+﻿# Build a self-contained Windows x64 installer.
 param(
     [string]$Version = "",
     [string]$BuildDir = "",
@@ -24,7 +24,8 @@ if ([string]::IsNullOrWhiteSpace($BuildDir)) {
 $BuildDir = [System.IO.Path]::GetFullPath($BuildDir)
 $stageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "stage"))
 $cacheRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "cache"))
-$distRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot "dist"))
+$releaseRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot ".."))
+$legacyDistRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot "dist"))
 $stageBuild = Join-Path $stageRoot "build"
 
 function Reset-StageDirectory {
@@ -134,8 +135,27 @@ function Copy-ProjectAssets {
     }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "StartUMI.vbs") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "StopUMI.vbs") -Destination $stageRoot
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "StartUMI.cmd") -Destination $stageRoot
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "README-install.txt") -Destination $stageRoot
+
+    # 安装包只运行已离线打包的 trajectory3d.bundle.js。开发用 ES Module
+    # 源码和 Three.js 模块树保留在 Git 仓库，不重复放入用户运行包。
+    $trajectorySource = Join-Path $stageRoot "frontend\trajectory3d.js"
+    if ([System.IO.File]::Exists($trajectorySource)) {
+        [System.IO.File]::Delete($trajectorySource)
+    }
+    $threeRuntimeRoot = Join-Path $stageRoot "frontend\lib\three"
+    $threeLicense = Join-Path $threeRuntimeRoot "LICENSE"
+    if ([System.IO.Directory]::Exists($threeRuntimeRoot)) {
+        Get-ChildItem -LiteralPath $threeRuntimeRoot -Force |
+            Where-Object { $_.FullName -ne $threeLicense } |
+            ForEach-Object {
+                if ($_.PSIsContainer) {
+                    [System.IO.Directory]::Delete($_.FullName, $true)
+                } else {
+                    [System.IO.File]::Delete($_.FullName)
+                }
+            }
+    }
     $driversRoot = Join-Path $stageRoot "drivers"
     [System.IO.Directory]::CreateDirectory($driversRoot) | Out-Null
     foreach ($driver in @(
@@ -242,6 +262,46 @@ function Install-EmbeddedPython {
     Get-ChildItem -LiteralPath $sitePackages -File -Recurse -Filter "*.pyc" -Force |
         ForEach-Object { [System.IO.File]::Delete($_.FullName) }
 
+    # PyArrow 的 C++ 头文件、导入库和 Cython 开发源只用于二次开发，数据转换
+    # 运行时仅依赖 .py、.pyd 和 .dll。移除后仍会执行下方真实导入验证。
+    $pyarrowRoot = Join-Path $sitePackages "pyarrow"
+    if ([System.IO.Directory]::Exists($pyarrowRoot)) {
+        foreach ($developmentDirectory in @("include", "includes", "src")) {
+            $developmentPath = Join-Path $pyarrowRoot $developmentDirectory
+            if ([System.IO.Directory]::Exists($developmentPath)) {
+                [System.IO.Directory]::Delete($developmentPath, $true)
+            }
+        }
+        foreach ($pattern in @("*.lib", "*.pxd", "*.pxi", "*.pyx")) {
+            $developmentFiles = @(Get-ChildItem -LiteralPath $pyarrowRoot -File -Filter $pattern -Force)
+            foreach ($developmentFile in $developmentFiles) {
+                Remove-Item -LiteralPath $developmentFile.FullName -Force -ErrorAction Stop
+            }
+        }
+    }
+
+    # pip 的目标目录安装偶尔会留下下载缓存占位文件。运行环境已经包含解包后的
+    # 模块，wheel 本身既不会被 Python 导入，也不应交付给最终用户。
+    $wheelFiles = @(Get-ChildItem -LiteralPath $sitePackages -File -Filter "*.whl" -Force)
+    foreach ($wheelFile in $wheelFiles) {
+        Remove-Item -LiteralPath $wheelFile.FullName -Force -ErrorAction Stop
+    }
+
+    & (Join-Path $pythonRoot "python.exe") -B -c "import numpy, pyarrow, pyarrow.parquet, h5py; print('Trimmed embedded Python dependencies OK')"
+    if ($LASTEXITCODE -ne 0) { throw "Embedded Python validation failed after cleanup" }
+
+    $remainingPyArrowDevelopmentItems = @(
+        Get-ChildItem -LiteralPath $pyarrowRoot -Force |
+            Where-Object {
+                ($_.PSIsContainer -and $_.Name -in @("include", "includes", "src")) -or
+                (-not $_.PSIsContainer -and $_.Extension -in @(".lib", ".pxd", ".pxi", ".pyx"))
+            }
+    )
+    $remainingWheelFiles = @(Get-ChildItem -LiteralPath $sitePackages -File -Filter "*.whl" -Force)
+    if ($remainingPyArrowDevelopmentItems.Count -ne 0 -or $remainingWheelFiles.Count -ne 0) {
+        throw "Embedded Python cleanup failed: development files remain in the staging directory"
+    }
+
     $remainingUnusedDirectories = @(
         Get-ChildItem -LiteralPath $sitePackages -Directory -Recurse -Force |
             Where-Object { $_.Name -in @("tests", "test", "__pycache__") }
@@ -271,7 +331,7 @@ Reset-StageDirectory
 Copy-ApplicationRuntime
 Copy-ProjectAssets
 Install-EmbeddedPython
-[System.IO.Directory]::CreateDirectory($distRoot) | Out-Null
+[System.IO.Directory]::CreateDirectory($releaseRoot) | Out-Null
 
 $requiredStageFiles = @(
     "build\ManualGripper.exe",
@@ -288,7 +348,6 @@ $requiredStageFiles = @(
     "tools\convert_to_rlds.py",
     "frontend\trajectory3d.bundle.js",
     "frontend\assets\models\umi-gripper.glb",
-    "frontend\lib\three\three.module.min.js",
     "frontend\lib\three\LICENSE"
 )
 foreach ($relativePath in $requiredStageFiles) {
@@ -305,6 +364,22 @@ $iscc = Find-InnoCompiler
 & $iscc "/DAppVersion=$Version" (Join-Path $PSScriptRoot "installer.iss")
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed" }
 
-$installer = Join-Path $distRoot "UMI-Data-Capture-Platform-$Version-Setup.exe"
+$installer = Join-Path $releaseRoot "UMI-Data-Capture-Platform-$Version-Setup.exe"
 if (-not [System.IO.File]::Exists($installer)) { throw "Installer was not generated: $installer" }
+
+# 成功生成新安装包之后，清理项目根目录中的旧版本和旧 dist 目录中的重复副本。
+# 只匹配固定安装包文件名，不递归删除目录，也不触碰其他可执行文件。
+foreach ($installerDirectory in @($releaseRoot, $legacyDistRoot)) {
+    if (-not [System.IO.Directory]::Exists($installerDirectory)) { continue }
+    $directoryPrefix = [System.IO.Path]::GetFullPath($installerDirectory).TrimEnd('\') + '\'
+    foreach ($oldInstaller in @(Get-ChildItem -LiteralPath $installerDirectory -File -Filter "UMI-Data-Capture-Platform-*-Setup.exe" -Force)) {
+        $oldInstallerPath = [System.IO.Path]::GetFullPath($oldInstaller.FullName)
+        if (-not $oldInstallerPath.StartsWith($directoryPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to remove an installer outside the release directory: $oldInstallerPath"
+        }
+        if ($oldInstallerPath -ne $installer) {
+            [System.IO.File]::Delete($oldInstallerPath)
+        }
+    }
+}
 Write-Output ("Installer ready: {0} ({1:N1} MiB)" -f $installer, ((Get-Item -LiteralPath $installer).Length / 1MB))

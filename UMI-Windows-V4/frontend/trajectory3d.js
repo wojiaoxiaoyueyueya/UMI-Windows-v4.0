@@ -11,7 +11,8 @@ const START_OFFSETS = {
     right: new THREE.Vector3(0.11, 0, 0)
 };
 const MODEL_MAX_SIZE_M = 0.09;
-const MODEL_JAW_TRAVEL = 35.5;
+// STEP 几何的两侧夹指初始间距约 107.8 mm，每侧移动 53.5 mm 后机械端面闭合。
+const MODEL_JAW_TRAVEL = 53.5;
 const FALLBACK_JAW_TRAVEL_M = 0.062;
 const JAW_NODES = {
     negative: ['NAUO7', 'NAUO8', 'NAUO9', 'NAUO22', 'NAUO23'],
@@ -33,6 +34,7 @@ let modelTemplate = null;
 let modelLoadPromise = null;
 let trailLimit = 600;
 let showModels = true;
+let showPointCloud = false;
 let positionDisplayScale = 3;
 let previousConnectedCount = 0;
 
@@ -46,6 +48,10 @@ function createHandView(side) {
         side,
         anchor: null,
         modelRoot: null,
+        cameraRig: null,
+        cameraHousing: null,
+        cameraFrustum: null,
+        visualPoints: null,
         jawNodes: [],
         trail: [],
         trailLine: null,
@@ -120,6 +126,7 @@ function initScene() {
         view.anchor = new THREE.Group();
         view.anchor.visible = false;
         scene.add(view.anchor);
+        installCameraRig(view);
 
         const geometry = new THREE.BufferGeometry().setFromPoints([START_OFFSETS[side].clone()]);
         const material = new THREE.LineBasicMaterial({
@@ -172,14 +179,93 @@ function bindControls() {
     if (modelToggle) modelToggle.addEventListener('change', function() {
         showModels = this.checked;
         ['left', 'right'].forEach(function(side) {
-            const view = handViews[side];
-            if (view.anchor) view.anchor.visible = showModels && view.connected && view.valid;
+            refreshHandVisibility(handViews[side]);
         });
+    });
+    const pointCloudToggle = byId('trajectoryPointCloudToggle');
+    if (pointCloudToggle) pointCloudToggle.addEventListener('change', function() {
+        showPointCloud = this.checked;
+        ['left', 'right'].forEach(function(side) {
+            refreshHandVisibility(handViews[side]);
+        });
+        window.setTimeout(fitView, 40);
     });
     const fitButton = byId('trajectoryFitBtn');
     if (fitButton) fitButton.addEventListener('click', fitView);
     const resetButton = byId('trajectoryResetBtn');
     if (resetButton) resetButton.addEventListener('click', resetTrajectory);
+}
+
+function installCameraRig(view) {
+    if (!view.anchor || view.cameraRig) return;
+    const rig = new THREE.Group();
+    // CAD 导出的 GLB 缺少鱼眼相机节点，因此在夹爪顶部补一个随位姿同步的相机组件。
+    rig.position.set(0, 0.038, 0.026);
+
+    const housing = new THREE.Group();
+    const shell = new THREE.Mesh(
+        new THREE.BoxGeometry(0.032, 0.022, 0.026),
+        new THREE.MeshStandardMaterial({ color: 0x222a35, metalness: 0.28, roughness: 0.52 })
+    );
+    shell.castShadow = true;
+    housing.add(shell);
+    const lens = new THREE.Mesh(
+        new THREE.SphereGeometry(0.009, 20, 12, 0, Math.PI * 2, 0, Math.PI * 0.62),
+        new THREE.MeshStandardMaterial({ color: 0x101827, metalness: 0.5, roughness: 0.2 })
+    );
+    lens.rotation.x = Math.PI / 2;
+    lens.position.z = 0.016;
+    housing.add(lens);
+    rig.add(housing);
+
+    const nearZ = 0.035;
+    const farZ = 0.40;
+    const nearX = 0.018;
+    const nearY = 0.011;
+    const farX = 0.20;
+    const farY = 0.12;
+    const corners = [
+        new THREE.Vector3(-nearX, -nearY, nearZ),
+        new THREE.Vector3(nearX, -nearY, nearZ),
+        new THREE.Vector3(nearX, nearY, nearZ),
+        new THREE.Vector3(-nearX, nearY, nearZ),
+        new THREE.Vector3(-farX, -farY, farZ),
+        new THREE.Vector3(farX, -farY, farZ),
+        new THREE.Vector3(farX, farY, farZ),
+        new THREE.Vector3(-farX, farY, farZ)
+    ];
+    const linePoints = [];
+    [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4],
+     [0, 4], [1, 5], [2, 6], [3, 7]].forEach(function(pair) {
+        linePoints.push(corners[pair[0]], corners[pair[1]]);
+    });
+    const frustum = new THREE.LineSegments(
+        new THREE.BufferGeometry().setFromPoints(linePoints),
+        new THREE.LineBasicMaterial({ color: COLORS[view.side], transparent: true, opacity: 0.26 })
+    );
+    frustum.visible = false;
+    rig.add(frustum);
+
+    const points = new THREE.Points(
+        new THREE.BufferGeometry(),
+        new THREE.PointsMaterial({
+            color: COLORS[view.side],
+            size: 0.006,
+            sizeAttenuation: true,
+            transparent: true,
+            opacity: 0.92,
+            depthWrite: false
+        })
+    );
+    points.visible = false;
+    points.frustumCulled = false;
+    rig.add(points);
+
+    view.anchor.add(rig);
+    view.cameraRig = rig;
+    view.cameraHousing = housing;
+    view.cameraFrustum = frustum;
+    view.visualPoints = points;
 }
 
 function resizeRenderer() {
@@ -290,8 +376,8 @@ function installFallbackModel(side) {
 
 function setJawClosure(view, closure) {
     const rawClosure = THREE.MathUtils.clamp(Number(closure) || 0, 0, 1);
-    // 实物在传感器接近端点时已经完全张开/闭合，将 2% 端点死区吸附到机械极限。
-    view.closure = rawClosure >= 0.98 ? 1 : (rawClosure <= 0.02 ? 0 : rawClosure);
+    // 新版磁编码在机械端点通常保留约 2%~6% 余量，将有效区间映射到完整行程。
+    view.closure = THREE.MathUtils.clamp((rawClosure - 0.02) / 0.92, 0, 1);
     view.jawNodes.forEach(function(entry) {
         const travel = entry.fallback ? FALLBACK_JAW_TRAVEL_M : MODEL_JAW_TRAVEL;
         entry.node.position.x = entry.baseX + entry.direction * travel * view.closure;
@@ -307,7 +393,10 @@ function fitView() {
         if (!view.connected || !view.valid || !view.anchor) return;
         bounds.expandByPoint(view.anchor.position);
         view.trail.forEach(function(point) { bounds.expandByPoint(point); });
-        if (showModels && view.modelRoot) bounds.expandByObject(view.anchor);
+        if (showModels && view.modelRoot) bounds.expandByObject(view.modelRoot);
+        if (showPointCloud && view.visualPoints && view.visualPoints.visible) {
+            bounds.expandByObject(view.visualPoints);
+        }
         hasContent = true;
     });
 
@@ -405,6 +494,11 @@ function createDemoPayload() {
             closure: (Math.sin(seconds * 1.3 + phase) + 1) * 0.5,
             quality: 0.91,
             visualFeatures: 126,
+            visualPointCloud: Array.from({ length: 72 }, function(_, index) {
+                const depth = 0.10 + (index % 18) / 17 * 0.30;
+                const angle = index * 2.399963;
+                return [Math.cos(angle) * depth * 0.32, Math.sin(angle) * depth * 0.20, depth];
+            }),
             stationary: false,
             originRelocalized: false,
             mode: 'visual_imu'
@@ -464,7 +558,7 @@ function updateHand(side, pose) {
 
     if (!view.anchor) return;
     if (!valid) {
-        view.anchor.visible = false;
+        refreshHandVisibility(view);
         view.poseInitialized = false;
         if (view.trailLine) view.trailLine.visible = false;
         return;
@@ -487,7 +581,8 @@ function updateHand(side, pose) {
         view.anchor.quaternion.copy(view.targetQuaternion);
         view.poseInitialized = true;
     }
-    view.anchor.visible = showModels;
+    updateVisualPointCloud(view, pose.visualPointCloud, Boolean(pose.cameraConnected));
+    refreshHandVisibility(view);
     setJawClosure(view, pose.closure);
     appendTrail(
         view, worldPosition, Number(pose.sampleCount) || 0,
@@ -498,6 +593,35 @@ function updateHand(side, pose) {
     setText(prefix + 'Position', position.x.toFixed(3) + ' / ' + position.y.toFixed(3) + ' / ' + position.z.toFixed(3));
     setText(prefix + 'Rotation', finiteNumber(euler[0]).toFixed(1) + '° / ' + finiteNumber(euler[1]).toFixed(1) + '° / ' + finiteNumber(euler[2]).toFixed(1) + '°');
     setText(prefix + 'Closure', '闭合 ' + Math.round(view.closure * 100) + '%');
+}
+
+function updateVisualPointCloud(view, cloud, cameraConnected) {
+    if (!view.visualPoints) return;
+    const positions = [];
+    if (Array.isArray(cloud)) {
+        cloud.forEach(function(point) {
+            if (!Array.isArray(point) || point.length < 3) return;
+            positions.push(finiteNumber(point[0]), finiteNumber(point[1]), finiteNumber(point[2]));
+        });
+    }
+    view.visualPoints.geometry.dispose();
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    view.visualPoints.geometry = geometry;
+    view.visualPoints.userData.hasPoints = positions.length >= 3;
+    view.visualPoints.userData.cameraConnected = cameraConnected;
+}
+
+function refreshHandVisibility(view) {
+    if (!view.anchor) return;
+    const online = view.connected && view.valid;
+    const hasPoints = Boolean(view.visualPoints && view.visualPoints.userData.hasPoints);
+    const cameraConnected = Boolean(view.visualPoints && view.visualPoints.userData.cameraConnected);
+    view.anchor.visible = online && (showModels || showPointCloud);
+    if (view.modelRoot) view.modelRoot.visible = showModels;
+    if (view.cameraHousing) view.cameraHousing.visible = showModels;
+    if (view.cameraFrustum) view.cameraFrustum.visible = online && showPointCloud && cameraConnected;
+    if (view.visualPoints) view.visualPoints.visible = online && showPointCloud && cameraConnected && hasPoints;
 }
 
 function appendTrail(view, point, sample, timestampUs, stationary) {
