@@ -247,9 +247,9 @@ public:
         // 新版夹爪固件完成校准后仍可能保留数度每秒的固定零偏。启动阶段先在
         // 重力稳定的短窗口内求平均，避免视觉线程较早启动时与校准条件相互等待。
         // 后续温漂学习仍要求视觉和 IMU 同时静止，不会吞掉正常的缓慢转动。
+        const bool bootstrapCandidate = accelStable
+            && rawGyro.norm() < kGyroBiasBootstrapMaxRad;
         if (!gyroBiasInitialized_) {
-            const bool bootstrapCandidate = accelStable
-                && rawGyro.norm() < kGyroBiasBootstrapMaxRad;
             if (bootstrapCandidate) {
                 gyroBiasAccumulator_ += rawGyro;
                 ++gyroBiasBootstrapSamples_;
@@ -303,8 +303,9 @@ public:
                 + kGyroBiasLearningRate * rawGyro;
             gyro = rawGyro - gyroBias_;
             if (gyro.norm() < kGyroStationaryThresholdRad) gyro.setZero();
-        } else if (!gyroBiasInitialized_) {
-            // 初始零偏尚未收敛时保持姿态，仅允许重力初始化，不积分未知偏置。
+        } else if (!gyroBiasInitialized_ && bootstrapCandidate) {
+            // 静止采样期间保持姿态，避免把尚未估计出的零偏积分进去。若设备
+            // 已经发生明显旋转则保留原始角速度，使启动校准期间模型也能响应。
             gyro.setZero();
         }
 

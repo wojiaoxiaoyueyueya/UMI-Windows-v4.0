@@ -48,8 +48,8 @@ function createHandView(side) {
         side,
         anchor: null,
         modelRoot: null,
+        modelMeshes: [],
         cameraRig: null,
-        cameraHousing: null,
         cameraFrustum: null,
         visualPoints: null,
         jawNodes: [],
@@ -62,7 +62,11 @@ function createHandView(side) {
         closure: 0,
         targetPosition: START_OFFSETS[side].clone(),
         targetQuaternion: new THREE.Quaternion(),
-        poseInitialized: false
+        poseInitialized: false,
+        positionFilterInitialized: false,
+        lastMappedPosition: new THREE.Vector3(),
+        filteredPosition: new THREE.Vector3(),
+        lastPositionSample: 0
     };
 }
 
@@ -126,7 +130,6 @@ function initScene() {
         view.anchor = new THREE.Group();
         view.anchor.visible = false;
         scene.add(view.anchor);
-        installCameraRig(view);
 
         const geometry = new THREE.BufferGeometry().setFromPoints([START_OFFSETS[side].clone()]);
         const material = new THREE.LineBasicMaterial({
@@ -196,27 +199,23 @@ function bindControls() {
     if (resetButton) resetButton.addEventListener('click', resetTrajectory);
 }
 
-function installCameraRig(view) {
-    if (!view.anchor || view.cameraRig) return;
+function installCameraRig(view, cameraMount, modelScale, fallback) {
+    if (!cameraMount || view.cameraRig) return;
     const rig = new THREE.Group();
-    // CAD 导出的 GLB 缺少鱼眼相机节点，因此在夹爪顶部补一个随位姿同步的相机组件。
-    rig.position.set(0, 0.038, 0.026);
-
-    const housing = new THREE.Group();
-    const shell = new THREE.Mesh(
-        new THREE.BoxGeometry(0.032, 0.022, 0.026),
-        new THREE.MeshStandardMaterial({ color: 0x222a35, metalness: 0.28, roughness: 0.52 })
-    );
-    shell.castShadow = true;
-    housing.add(shell);
-    const lens = new THREE.Mesh(
-        new THREE.SphereGeometry(0.009, 20, 12, 0, Math.PI * 2, 0, Math.PI * 0.62),
-        new THREE.MeshStandardMaterial({ color: 0x101827, metalness: 0.5, roughness: 0.2 })
-    );
-    lens.rotation.x = Math.PI / 2;
-    lens.position.z = 0.016;
-    housing.add(lens);
-    rig.add(housing);
+    if (fallback) {
+        // 仅在 CAD 模型加载失败时保留视锥，方向仍朝向夹爪正前方。
+        rig.position.set(0, 0.04, -0.025);
+        rig.rotation.y = Math.PI;
+    } else {
+        // LuoKe-M12Y011-12MP 镜头的光轴沿镜头节点局部 +Y，镜片最前端
+        // 位于约 20.35 mm。视锥自身沿 +Z 建模，因此绕 X 轴 -90° 后
+        // 与真实镜头光轴重合，并从镜片前表面开始向夹爪正前方展开。
+        rig.position.set(0, 20.35, 0);
+        rig.rotation.x = -Math.PI / 2;
+        // 外层 normalizer 把 CAD 毫米缩放到场景米制；这里抵消该缩放，使视锥
+        // 和视觉点云继续使用后端返回的米制坐标，同时保留真实相机安装位姿。
+        rig.scale.setScalar(1 / Math.max(Math.abs(modelScale) || 1, 1e-6));
+    }
 
     const nearZ = 0.035;
     const farZ = 0.40;
@@ -261,9 +260,8 @@ function installCameraRig(view) {
     points.frustumCulled = false;
     rig.add(points);
 
-    view.anchor.add(rig);
+    cameraMount.add(rig);
     view.cameraRig = rig;
-    view.cameraHousing = housing;
     view.cameraFrustum = frustum;
     view.visualPoints = points;
 }
@@ -303,6 +301,7 @@ function installHandModel(side) {
     const materialMap = new Map();
     model.traverse(function(object) {
         if (!object.isMesh) return;
+        view.modelMeshes.push(object);
         object.castShadow = true;
         object.receiveShadow = true;
         const sourceMaterials = Array.isArray(object.material) ? object.material : [object.material];
@@ -329,6 +328,16 @@ function installHandModel(side) {
     normalizer.add(model);
     view.anchor.add(normalizer);
     view.modelRoot = normalizer;
+
+    // NAUO1 是鱼眼相机装配中的真实镜头节点，节点本身已经包含镜头相对于
+    // 相机座和夹爪总装的完整位姿。视锥直接挂在镜头上，避免方向再次颠倒。
+    const cameraLens = model.getObjectByName('NAUO1');
+    if (cameraLens) {
+        installCameraRig(view, cameraLens, normalizer.scale.x, false);
+    } else {
+        console.warn('[空间位姿] 未找到鱼眼相机 CAD 节点，使用前向视锥降级显示');
+        installCameraRig(view, view.anchor, 1, true);
+    }
 
     JAW_NODES.negative.forEach(function(name) { registerJawNode(view, model, name, 1); });
     JAW_NODES.positive.forEach(function(name) { registerJawNode(view, model, name, -1); });
@@ -363,14 +372,17 @@ function installFallbackModel(side) {
     const body = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.17, 0.065), bodyMaterial);
     body.position.y = -0.07;
     group.add(body);
+    view.modelMeshes.push(body);
     [-1, 1].forEach(function(direction) {
         const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.105, 0.035), jawMaterial);
         jaw.position.set(direction * 0.075, 0.055, 0);
         group.add(jaw);
+        view.modelMeshes.push(jaw);
         view.jawNodes.push({ node: jaw, baseX: jaw.position.x, direction: -direction, fallback: true });
     });
     view.anchor.add(group);
     view.modelRoot = group;
+    installCameraRig(view, view.anchor, 1, true);
     setJawClosure(view, view.closure);
 }
 
@@ -442,6 +454,8 @@ function clearTrails() {
         view.trail = [];
         view.lastSample = 0;
         view.lastTrailTime = 0;
+        view.positionFilterInitialized = false;
+        view.lastPositionSample = 0;
         updateTrailGeometry(view);
     });
 }
@@ -486,11 +500,11 @@ function createDemoPayload() {
             sampleCount: Math.round(performance.now()),
             position: [
                 Math.sin(seconds * 0.7 + phase) * 0.11,
-                0.05 + Math.sin(seconds * 0.9 + phase) * 0.035,
-                Math.cos(seconds * 0.7 + phase) * 0.09
+                -(0.05 + Math.sin(seconds * 0.9 + phase) * 0.035),
+                -Math.cos(seconds * 0.7 + phase) * 0.09
             ],
-            quaternion: [0, Math.sin(halfYaw), 0, Math.cos(halfYaw)],
-            euler: [0, yaw * 180 / Math.PI, 0],
+            quaternion: [0, 0, Math.sin(halfYaw), Math.cos(halfYaw)],
+            euler: [0, 0, yaw * 180 / Math.PI],
             closure: (Math.sin(seconds * 1.3 + phase) + 1) * 0.5,
             quality: 0.91,
             visualFeatures: 126,
@@ -560,21 +574,60 @@ function updateHand(side, pose) {
     if (!valid) {
         refreshHandVisibility(view);
         view.poseInitialized = false;
+        view.positionFilterInitialized = false;
+        view.lastPositionSample = 0;
         if (view.trailLine) view.trailLine.visible = false;
         return;
     }
 
-    const position = new THREE.Vector3(
-        finiteNumber(pose.position && pose.position[0]),
-        finiteNumber(pose.position && pose.position[1]),
-        finiteNumber(pose.position && pose.position[2])
+    const sourcePosition = pose.position || [0, 0, 0];
+    // 视觉融合输出的位置已经按 X/Y/Z 场景轴排列，但图像坐标的 Y 轴向下，
+    // 与 Three.js 的绿色 Y 轴向上相反；视觉深度方向也与场景蓝色 Z 轴相反。
+    // 因此左右保持不变，上下和前后分别翻转。
+    const mappedPosition = new THREE.Vector3(
+        finiteNumber(sourcePosition[0]),
+        -finiteNumber(sourcePosition[1]),
+        -finiteNumber(sourcePosition[2])
     );
+    const positionSample = Number(pose.sampleCount) || 0;
+    const positionReset = !view.positionFilterInitialized
+        || Boolean(pose.originRelocalized)
+        || (positionSample > 0 && view.lastPositionSample > 0
+            && positionSample < view.lastPositionSample);
+    if (positionReset) {
+        view.lastMappedPosition.copy(mappedPosition);
+        view.filteredPosition.copy(mappedPosition);
+        view.positionFilterInitialized = true;
+    } else {
+        const delta = mappedPosition.clone().sub(view.lastMappedPosition);
+        view.lastMappedPosition.copy(mappedPosition);
+
+        if (pose.stationary) {
+            delta.set(0, 0, 0);
+        } else {
+            // 未标定鱼眼单目视觉在纯上下运动时容易产生同方向的深度串扰。
+            // 使用增量主轴判定抑制较小的伴随分量，同时保留真正的斜向运动。
+            const vertical = Math.abs(delta.y);
+            const depth = Math.abs(delta.z);
+            if (vertical >= depth * 0.65 && vertical > 0.00005) {
+                delta.z = 0;
+            } else if (depth >= vertical * 1.8 && depth > 0.00005) {
+                delta.y = 0;
+            }
+        }
+        view.filteredPosition.add(delta);
+    }
+    view.lastPositionSample = positionSample;
+    const position = view.filteredPosition.clone();
     const worldPosition = START_OFFSETS[side].clone().addScaledVector(position, positionDisplayScale);
     view.targetPosition.copy(worldPosition);
 
     const q = pose.quaternion || [0, 0, 0, 1];
+    // IMU 安装轴与视觉位移轴不同，因此姿态单独转换。红色 X 轴旋转保持
+    // 原方向，设备蓝色 Z 轴旋转显示为场景绿色 Y 轴，设备绿色 Y 轴旋转
+    // 显示为场景蓝色 Z 轴的反方向。
     view.targetQuaternion.set(
-        finiteNumber(q[0]), finiteNumber(q[1]), finiteNumber(q[2]), finiteNumber(q[3], 1)
+        finiteNumber(q[0]), finiteNumber(q[2]), -finiteNumber(q[1]), finiteNumber(q[3], 1)
     ).normalize();
     if (!view.poseInitialized) {
         view.anchor.position.copy(view.targetPosition);
@@ -589,9 +642,11 @@ function updateHand(side, pose) {
         Number(pose.timestampUs) || 0, Boolean(pose.stationary)
     );
 
-    const euler = pose.euler || [0, 0, 0];
+    const euler = new THREE.Euler().setFromQuaternion(view.targetQuaternion, 'XYZ');
     setText(prefix + 'Position', position.x.toFixed(3) + ' / ' + position.y.toFixed(3) + ' / ' + position.z.toFixed(3));
-    setText(prefix + 'Rotation', finiteNumber(euler[0]).toFixed(1) + '° / ' + finiteNumber(euler[1]).toFixed(1) + '° / ' + finiteNumber(euler[2]).toFixed(1) + '°');
+    setText(prefix + 'Rotation', THREE.MathUtils.radToDeg(euler.x).toFixed(1) + '° / '
+        + THREE.MathUtils.radToDeg(euler.y).toFixed(1) + '° / '
+        + THREE.MathUtils.radToDeg(euler.z).toFixed(1) + '°');
     setText(prefix + 'Closure', '闭合 ' + Math.round(view.closure * 100) + '%');
 }
 
@@ -618,8 +673,8 @@ function refreshHandVisibility(view) {
     const hasPoints = Boolean(view.visualPoints && view.visualPoints.userData.hasPoints);
     const cameraConnected = Boolean(view.visualPoints && view.visualPoints.userData.cameraConnected);
     view.anchor.visible = online && (showModels || showPointCloud);
-    if (view.modelRoot) view.modelRoot.visible = showModels;
-    if (view.cameraHousing) view.cameraHousing.visible = showModels;
+    if (view.modelRoot) view.modelRoot.visible = online && (showModels || showPointCloud);
+    view.modelMeshes.forEach(function(mesh) { mesh.visible = showModels; });
     if (view.cameraFrustum) view.cameraFrustum.visible = online && showPointCloud && cameraConnected;
     if (view.visualPoints) view.visualPoints.visible = online && showPointCloud && cameraConnected && hasPoints;
 }

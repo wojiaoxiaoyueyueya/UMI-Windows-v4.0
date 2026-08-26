@@ -42,7 +42,7 @@
 | `frontend/script.js` | 采集控制台逻辑，包括设备状态、视频流、录制、转换、夹爪控制、剪刀石头布和槽位映射同步。 |
 | `frontend/trajectory3d.js` | 空间位姿页的 Three.js 源码、轨迹倍率、夹爪与相机模型、稀疏点云、交互控制和闭合动画。 |
 | `frontend/trajectory3d.bundle.js` | 已打包的离线三维运行脚本，普通用户不需要 Node.js。 |
-| `frontend/assets/models/umi-gripper.glb` | 浏览器运行时使用的手动夹爪三维模型。 |
+| `frontend/assets/models/umi-gripper.glb` | 浏览器运行时使用的手动夹爪与真实鱼眼相机完整三维装配。 |
 | `frontend/style.css` | 采集控制台样式。 |
 | `frontend/info.html` | 当前版本和项目简介页面。 |
 
@@ -53,7 +53,7 @@
 | `tools/convert_to_lerobot.py` | 原始会话转换为 LeRobot 数据集。 |
 | `tools/convert_to_hdf5.py` | 原始会话转换为 HDF5 数据集。 |
 | `tools/convert_to_rlds.py` | 原始会话转换为 RLDS/TFRecord 风格数据。 |
-| `tools/convert_gripper_step.py` | 将 `assets/cad/umi_gripper` 中的完整 STEP 装配转换为网页 GLB。 |
+| `tools/convert_gripper_step.py` | 校验夹爪、鱼眼相机壳体和镜头的外部 STEP 依赖，并将完整装配转换为网页 GLB。 |
 | `collect_dlls.ps1` | CMake 构建后自动递归收集并校验运行时 DLL，也可由开发者手动复核。 |
 
 ## 第三方依赖目录

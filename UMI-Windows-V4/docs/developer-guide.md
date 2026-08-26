@@ -427,6 +427,14 @@ npx --yes esbuild@0.25.9 frontend/trajectory3d.js --bundle --format=iife --platf
 
 普通运行和安装包不需要 Node.js；只有修改三维源码时才需要执行该命令。
 
+更新夹爪或鱼眼相机 CAD 后，先确认 `assets/cad/umi_gripper` 中总装引用的所有 STEP 零件齐全，再使用安装了 CadQuery 的 Python 执行：
+
+```powershell
+python tools/convert_gripper_step.py
+```
+
+转换脚本会生成 `frontend/assets/models/umi-gripper.glb`。三维页面把位移和 IMU 安装轴分开转换；修改坐标逻辑时必须分别验证红色 X、绿色 Y、蓝色 Z 的纯平移和纯旋转，不能只依靠组合动作判断。
+
 ## 14. 回归测试清单
 
 每次涉及设备、录制、线程或 UI 联动的修改，至少完成：
@@ -442,7 +450,8 @@ npx --yes esbuild@0.25.9 frontend/trajectory3d.js --bundle --format=iife --platf
 9. 视频时长与统一时间戳一致。
 10. LeRobot、HDF5、RLDS 至少执行目标格式的最小转换测试。
 11. Edge/Chrome 页面无明显遮挡、控制台异常或资源 404。
-12. 空间位姿页只显示已连接夹爪，左右交换正确，模型可平移和旋转，完整闭合、相机视锥、稀疏点云开关、动态取景、双手协同状态和 `pose_data/trajectory.csv` 正常。
+12. 空间位姿页只显示已连接夹爪，左右交换正确；分别测试左右、上下、前后和三轴旋转，模型方向一致且启动校准期间不会锁死。
+13. 完整闭合、真实鱼眼相机模型、镜头正向视锥、稀疏点云开关、动态取景、双手协同状态和 `pose_data/trajectory.csv` 正常。
 
 没有连接对应硬件时，应在提交说明中明确写出未覆盖的实机测试项。
 

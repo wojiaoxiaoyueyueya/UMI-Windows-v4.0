@@ -6,7 +6,7 @@ UMI 数据采集系统用于机器人操作数据采集、设备控制、会话�
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前推荐版本 | `UMI-Windows-V4` 4.3.2 |
+| 当前推荐版本 | `UMI-Windows-V4` 4.3.3 |
 | 当前主系统 | Windows 10 / Windows 11 64 位 |
 | 主要协议 | UMI 手动夹爪 V4.0 |
 | 发布形式 | 源码、完整 SDK/驱动、Windows 一键安装包 |
@@ -18,7 +18,7 @@ UMI 数据采集系统用于机器人操作数据采集、设备控制、会话�
 
 | 目录 | 当前版本 | 定位 | 维护状态 |
 | --- | --- | --- | --- |
-| [`UMI-Windows-V4`](UMI-Windows-V4/) | `4.3.2` | 当前 Windows 主版本，使用 UMI V4.0 手动夹爪协议 | 主动维护 |
+| [`UMI-Windows-V4`](UMI-Windows-V4/) | `4.3.3` | 当前 Windows 主版本，使用 UMI V4.0 手动夹爪协议 | 主动维护 |
 | [`UMI-Windows-Legacy`](UMI-Windows-Legacy/) | `3.0.0` | Windows 旧手动夹爪协议版本 | 兼容归档 |
 | [`UMI-Linux-Legacy`](UMI-Linux-Legacy/) | `1.0.0` | Ubuntu 22.04 移植版本 | 兼容归档 |
 

@@ -8,7 +8,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
+import sys
 
 import cadquery as cq
 
@@ -47,6 +49,14 @@ PART_BY_OCCURRENCE = {
     "NAUO28": "鱼眼相机.STEP",
 }
 
+# 鱼眼相机自身也是一个带外部引用的 STEP 装配体。缺少这两个零件时，
+# CadQuery 仍可能导出夹爪主体，但相机节点会变成没有网格的空节点。
+CAMERA_EXTERNAL_PARTS = {
+    "LQ25-11FCMB-01-001.STEP",
+    "LQ25-11FCMB-01-02.STEP",
+    "LuoKe-M12Y011-12MP.STEP",
+}
+
 # 这些外侧零件随夹爪闭合向中间运动。节点名前缀由前端用于建立动画分组。
 LEFT_JAW_OCCURRENCES = {"NAUO7", "NAUO8", "NAUO9", "NAUO22", "NAUO23"}
 RIGHT_JAW_OCCURRENCES = {"NAUO4", "NAUO5", "NAUO10", "NAUO16", "NAUO21"}
@@ -55,9 +65,9 @@ RIGHT_JAW_OCCURRENCES = {"NAUO4", "NAUO5", "NAUO10", "NAUO16", "NAUO21"}
 def load_assembly(master_step: Path) -> cq.Assembly:
     # CadQuery 会在零件文件位于主文件同目录时自动解析 AP214 外部引用。
     # 先主动校验依赖，避免导出一个只有节点、没有几何体的空 GLB。
+    required_parts = set(PART_BY_OCCURRENCE.values()) | CAMERA_EXTERNAL_PARTS
     missing = {
-        part_name
-        for part_name in PART_BY_OCCURRENCE.values()
+        part_name for part_name in required_parts
         if not (master_step.parent / part_name).exists()
     }
     if missing:
@@ -106,3 +116,9 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    # Windows 下 OCP/VTK 偶尔会在解释器退出、释放全局对象时触发访问冲突，
+    # 此时 GLB 已经完整写入。显式结束可让转换命令稳定返回成功状态。
+    if sys.platform == "win32":
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)

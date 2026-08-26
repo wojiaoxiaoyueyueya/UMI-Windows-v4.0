@@ -202,7 +202,7 @@
             </div>
             <div class="version-panel">
                 <span>当前稳定版本</span>
-                <strong>4.3.2</strong>
+                <strong>4.3.3</strong>
                 <div class="version-meta">
                     <div><span>发布日期</span><b>2026-08-26</b></div>
                     <div><span>协议代际</span><b>UMI V4.0</b></div>
@@ -227,7 +227,7 @@
                 <article class="module"><span class="module-index">02</span><h3>设备控制</h3><p>相机参数、手动夹爪 V4 数据、CAN 电动夹爪和夹爪遥控集中操作。</p></article>
                 <article class="module"><span class="module-index">03</span><h3>时间同步</h3><p>视频帧、夹爪、IMU 和动作使用同一会话时间基准，保留逐帧时间戳。</p></article>
                 <article class="module"><span class="module-index">04</span><h3>数据交付</h3><p>提供 LeRobot、HDF5、RLDS 输出，并区分训练就绪与观察归档数据。</p></article>
-                <article class="module"><span class="module-index">05</span><h3>空间位姿</h3><p>融合左右手画面与 V4 IMU，提供相对三维轨迹、完整闭合动画、相机视锥和稀疏视觉特征点。</p></article>
+                <article class="module"><span class="module-index">05</span><h3>空间位姿</h3><p>融合左右手画面与 V4 IMU，提供相对三维轨迹、完整夹爪与鱼眼相机 STEP 模型、闭合动画、视锥和稀疏视觉特征点。</p></article>
             </div>
         </section>
 
@@ -256,6 +256,8 @@
                 <p>早期里程碑版本号为项目整理时补充</p>
             </div>
             <div class="release-list">
+                <div class="release-version"><strong>4.3.3</strong><span>2026-08-26</span></div>
+                <div class="release-body"><h3>真实鱼眼装配与位姿方向修复</h3><p>导入完整鱼眼相机壳体和镜头 STEP 零件，视锥从真实镜头向前展开；修正前后、上下和 IMU 安装轴映射，抑制上下运动的深度串扰，并解决启动校准阶段模型偶尔不响应旋转的问题。</p></div>
                 <div class="release-version"><strong>4.3.2</strong><span>2026-08-26</span></div>
                 <div class="release-body"><h3>三维平移、点云与双语安装</h3><p>修复低速移动只旋转不平移和模型闭合留缝；新增相机模型、视锥与稀疏特征点云；安装向导支持中英文、目录新建和单一启动入口。</p></div>
                 <div class="release-version"><strong>4.3.1</strong><span>2026-08-26</span></div>
@@ -281,7 +283,7 @@
             </div>
         </div>
 
-        <footer>UMI Data Capture Platform 4.3.2</footer>
+        <footer>UMI Data Capture Platform 4.3.3</footer>
     </main>
     <script src="/service-lifecycle.js?v=20260826process"></script>
 </body>

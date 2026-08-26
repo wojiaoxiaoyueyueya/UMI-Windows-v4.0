@@ -4,4 +4,4 @@ Windows 安装包包含可执行后台、前端页面、Python 转换运行时�
 
 下载地址：<https://github.com/wojiaoxiaoyueyueya/UMI-Windows-v4.0/releases/latest>
 
-当前发布版本：`4.3.1`
+当前发布版本：`4.3.3`
