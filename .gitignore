@@ -21,6 +21,7 @@ Makefile
 # 采集和转换数据
 data_capture/
 data_converted/
+data_upload_staging/
 
 # 日志、缓存和临时文件
 *.log

@@ -417,7 +417,7 @@ def convert_slot(source_dir, output_dir, session_id, fps, start_us, task,
     gripper_rows, is_electric, has_embedded_imu = read_gripper(used_gripper_path) if has_gripper else ([], False, False)
     has_imu = has_standalone_imu or (has_gripper and has_embedded_imu and not is_electric)
 
-    # 训练转换必须读取真实控制命令。兼容开关只供检查历史观测包，网页端不启用。
+    # 如果源数据包含真实控制命令则完整导出；观测数据转换可不包含 action。
     action_rows = []
     action_names = []
     action_file = find_action_file(slot_dir)
@@ -814,7 +814,7 @@ def main():
     shutil.rmtree(partial_output_dir, ignore_errors=True)
 
     try:
-        write_progress(progress_file, 0.0, "正在检查训练数据合同...")
+        write_progress(progress_file, 0.0, "正在检查源数据...")
         if not task.strip() and not allow_observation_only:
             raise ConversionError("缺少真实任务指令；LeRobot 训练转换必须填写本次示范执行的具体任务")
 
@@ -878,7 +878,7 @@ def main():
     except ConversionError as exc:
         shutil.rmtree(partial_output_dir, ignore_errors=True)
         message = str(exc)
-        write_progress(progress_file, 1.0, "训练数据校验失败", done=True, error=message)
+        write_progress(progress_file, 1.0, "数据转换失败", done=True, error=message)
         sys.stderr.write(f"ERROR: {message}\n")
         sys.exit(4)
     except Exception as exc:

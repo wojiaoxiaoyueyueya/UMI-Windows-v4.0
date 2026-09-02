@@ -127,10 +127,10 @@ function Copy-ProjectAssets {
     }
     $stageTools = Join-Path $stageRoot "tools"
     [System.IO.Directory]::CreateDirectory($stageTools) | Out-Null
-    foreach ($tool in @("convert_to_hdf5.py", "convert_to_lerobot.py", "convert_to_rlds.py")) {
+    foreach ($tool in @("convert_to_hdf5.py", "convert_to_lerobot.py", "convert_to_rlds.py", "upload_to_eidp.py")) {
         Copy-Item -LiteralPath (Join-Path $projectRoot "tools\$tool") -Destination $stageTools
     }
-    foreach ($file in @("config.json", "requirements.txt", "README.md", "CHANGELOG.md", "VERSION")) {
+    foreach ($file in @("config.json", "config.local.example.json", "requirements.txt", "README.md", "CHANGELOG.md", "VERSION")) {
         Copy-Item -LiteralPath (Join-Path $projectRoot $file) -Destination (Join-Path $stageRoot $file)
     }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "StartUMI.vbs") -Destination $stageRoot

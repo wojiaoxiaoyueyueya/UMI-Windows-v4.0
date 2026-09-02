@@ -11,7 +11,7 @@
 (function() {
     // ---- 侧边栏收缩/展开（localStorage 跨页面联动） ----
     var SIDEBAR_KEY = 'sidebar_collapsed';
-    var SIDEBAR_SELECTOR = '.sidebar, .collect-sidebar, .eg-sidebar, .camera-control-sidebar, .rps-sidebar, .teleop-sidebar, .trajectory-sidebar';
+    var SIDEBAR_SELECTOR = '.sidebar, .collect-sidebar, .platform-upload-sidebar, .eg-sidebar, .camera-control-sidebar, .rps-sidebar, .teleop-sidebar, .trajectory-sidebar';
     var sidebarFollowFrame = 0;
 
     function activePageSidebar() {
@@ -2620,14 +2620,7 @@
         var dir = document.getElementById('convertSourceDir').value.trim();
         var outDir = document.getElementById('convertOutputDir').value.trim();
         var format = document.getElementById('convertFormat').value;
-        var taskInput = document.getElementById('convertTask');
-        var task = taskInput ? taskInput.value.trim() : '';
-        if (format === 'lerobot' && !task) {
-            showToast('LeRobot 训练转换必须填写真实任务指令', 'error');
-            if (taskInput) taskInput.focus();
-            return;
-        }
-        var formatLabels = { lerobot: 'LeRobot v3.0（训练校验）', hdf5: 'HDF5 v1.0（观测归档）', rlds: 'RLDS v0.1（观测归档）' };
+        var formatLabels = { lerobot: 'LeRobot v3.0', hdf5: 'HDF5 v1.0', rlds: 'RLDS v0.1' };
         document.getElementById('convertProgressPanel').style.display = '';
         document.getElementById('convertProgressFill').style.width = '0%';
         document.getElementById('convertProgressFill').classList.remove('done');
@@ -2645,7 +2638,7 @@
         fetch('/api/convert', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'start', sourceDir: dir, sessions: sessions, task: task, outputDir: outDir, format: format })
+            body: JSON.stringify({ action: 'start', sourceDir: dir, sessions: sessions, task: '', outputDir: outDir, format: format })
         }).catch(function() {
             stopConvertPolling();
             document.getElementById('convertError').style.display = '';
@@ -2730,7 +2723,7 @@
                 return;
             }
             updateResultHeader(converted.length, skipped.length);
-            var formatLabels = { lerobot: 'LeRobot v3.0（训练校验）', hdf5: 'HDF5 v1.0（观测归档）', rlds: 'RLDS v0.1（观测归档）' };
+            var formatLabels = { lerobot: 'LeRobot v3.0', hdf5: 'HDF5 v1.0', rlds: 'RLDS v0.1' };
             var curFormat = document.getElementById('convertFormat').value;
             var fmtLabel = formatLabels[curFormat] || curFormat;
             var outputDir = document.getElementById('convertOutputDir').value.trim() || 'data_converted';
@@ -2771,6 +2764,534 @@
 
     // 加载转换页面时自动浏览
     if(currentPage === 'convert') loadSessions();
+
+    // ---- 数据平台上传 ----
+    // token 只保留在当前页面内存中，不写入 localStorage；平台密码由后端
+    // 保存到本机私有配置，浏览器读取配置时只能得到“是否已保存”。
+    var uploadState = {
+        initialized: false,
+        token: '',
+        username: '',
+        config: null,
+        folders: [],
+        folderPath: '',
+        filterYear: 0,
+        filterMonth: 0,
+        filterDay: 0,
+        filterFormat: 'all',
+        tasks: [],
+        instances: [],
+        taskId: '',
+        instanceId: '',
+        uploading: false,
+        pollTimer: null,
+        notified: false
+    };
+
+    function uploadPost(path, body) {
+        return fetch(path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body || {})
+        }).then(function(response) { return response.json(); });
+    }
+
+    function uploadFieldValue(id) {
+        var el = document.getElementById(id);
+        return el ? el.value.trim() : '';
+    }
+
+    function setUploadConnection(text, type) {
+        var stateEl = document.getElementById('uploadConnectionState');
+        var textEl = document.getElementById('uploadConnectionText');
+        if (stateEl) stateEl.className = 'platform-connection-state' + (type ? ' ' + type : '');
+        if (textEl) textEl.textContent = text;
+    }
+
+    function setUploadOptions(select, records, valueKey, labelBuilder, emptyText) {
+        if (!select) return;
+        var html = '<option value="">' + escapeHtml(emptyText) + '</option>';
+        (records || []).forEach(function(record) {
+            var value = record[valueKey] == null ? '' : String(record[valueKey]);
+            html += '<option value="' + escapeHtml(value) + '">' + escapeHtml(labelBuilder(record)) + '</option>';
+        });
+        select.innerHTML = html;
+    }
+
+    function parseConvertedFolderIdentity(id) {
+        var match = String(id || '').match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})_(lerobot|hdf5|rlds)$/i);
+        if (!match) return null;
+        var date = new Date(+match[1], +match[2] - 1, +match[3], +match[4], +match[5], +match[6]);
+        if (date.getFullYear() !== +match[1] || date.getMonth() !== +match[2] - 1 || date.getDate() !== +match[3]
+            || date.getHours() !== +match[4] || date.getMinutes() !== +match[5] || date.getSeconds() !== +match[6]) {
+            return null;
+        }
+        return { date: date, format: match[7].toLowerCase() };
+    }
+
+    function uploadFormatLabel(format) {
+        return { lerobot: 'LeRobot', hdf5: 'HDF5', rlds: 'RLDS' }[format] || '其他';
+    }
+
+    function buildUploadFilterOptions() {
+        var years = new Set();
+        uploadState.folders.forEach(function(folder) {
+            if (folder._date) years.add(folder._date.getFullYear());
+        });
+        var yearSelect = document.getElementById('uploadFilterYear');
+        var monthSelect = document.getElementById('uploadFilterMonth');
+        var daySelect = document.getElementById('uploadFilterDay');
+        if (!yearSelect || !monthSelect || !daySelect) return;
+        yearSelect.innerHTML = '<option value="0">全部年份</option>' + Array.from(years).sort(function(a, b) {
+            return b - a;
+        }).map(function(year) {
+            return '<option value="' + year + '"' + (year === uploadState.filterYear ? ' selected' : '') + '>' + year + '年</option>';
+        }).join('');
+        monthSelect.innerHTML = '<option value="0">全部月份</option>';
+        for (var month = 1; month <= 12; month++) {
+            monthSelect.innerHTML += '<option value="' + month + '"' + (month === uploadState.filterMonth ? ' selected' : '') + '>' + month + '月</option>';
+        }
+        var referenceYear = uploadState.filterYear || new Date().getFullYear();
+        var days = uploadState.filterMonth ? new Date(referenceYear, uploadState.filterMonth, 0).getDate() : 31;
+        daySelect.innerHTML = '<option value="0">全部日期</option>';
+        for (var day = 1; day <= days; day++) {
+            daySelect.innerHTML += '<option value="' + day + '"' + (day === uploadState.filterDay ? ' selected' : '') + '>' + day + '日</option>';
+        }
+        document.getElementById('uploadFilterBar').style.display = uploadState.folders.length ? 'flex' : 'none';
+    }
+
+    function getFilteredUploadFolders() {
+        return uploadState.folders.filter(function(folder) {
+            var date = folder._date;
+            if (uploadState.filterYear && (!date || date.getFullYear() !== uploadState.filterYear)) return false;
+            if (uploadState.filterMonth && (!date || date.getMonth() + 1 !== uploadState.filterMonth)) return false;
+            if (uploadState.filterDay && (!date || date.getDate() !== uploadState.filterDay)) return false;
+            if (uploadState.filterFormat !== 'all' && folder._format !== uploadState.filterFormat) return false;
+            return true;
+        });
+    }
+
+    function selectUploadFolder(folder) {
+        uploadState.folderPath = folder ? String(folder.path || '') : '';
+        var hidden = document.getElementById('uploadFolderPath');
+        if (hidden) hidden.value = uploadState.folderPath;
+        renderUploadFolders();
+        updateUploadSummary();
+    }
+
+    function renderUploadFolders() {
+        var list = document.getElementById('uploadFolderList');
+        var count = document.getElementById('uploadFolderCount');
+        if (!list) return;
+        var filtered = getFilteredUploadFolders();
+        if (count) count.textContent = '（' + filtered.length + ' / ' + uploadState.folders.length + '）';
+        if (!filtered.length) {
+            list.innerHTML = '<div class="empty-state">' + (uploadState.folders.length ? '当前筛选没有转换结果' : '转换目录中暂无可上传文件夹') + '</div>';
+            updateUploadSummary();
+            return;
+        }
+        list.innerHTML = filtered.map(function(folder, index) {
+            var selected = folder.path === uploadState.folderPath;
+            var dateLabel = folder._date ? formatSessionDateLabel(String(folder.id || '').slice(0, 15)) : String(folder.id || '未命名转换结果');
+            var details = uploadFormatLabel(folder._format) + ' · ' + Number(folder.fileCount || 0) + ' 个文件 · ' + formatFileSize(Number(folder.size || 0));
+            return '<div class="convert-session-item platform-upload-folder' + (selected ? ' selected' : '') + '" data-index="' + index + '">'
+                + '<input type="radio" name="upload-folder"' + (selected ? ' checked' : '') + ' aria-label="选择 ' + escapeHtml(String(folder.id || '')) + '">'
+                + '<div class="convert-session-info"><div class="convert-session-id">' + escapeHtml(dateLabel)
+                + ' <span class="platform-format-tag">' + escapeHtml(uploadFormatLabel(folder._format)) + '</span></div>'
+                + '<div class="convert-session-detail">' + escapeHtml(details) + '<br><span class="platform-folder-path">' + escapeHtml(String(folder.path || '')) + '</span></div></div></div>';
+        }).join('');
+        requestAnimationFrame(function() {
+            list.querySelectorAll('.platform-upload-folder').forEach(function(element, index) {
+                setTimeout(function() { element.classList.add('visible'); }, index * 25);
+                element.addEventListener('click', function() {
+                    selectUploadFolder(filtered[+element.getAttribute('data-index')]);
+                });
+            });
+        });
+    }
+
+    function loadUploadFolders() {
+        var list = document.getElementById('uploadFolderList');
+        var button = document.getElementById('uploadBrowseBtn');
+        if (list) list.innerHTML = '<div class="empty-state">正在读取转换结果...</div>';
+        if (button) button.disabled = true;
+        return Promise.all([
+            fetch('/api/paths').then(function(response) { return response.json(); }),
+            fetch('/api/data/browse?dir=converted').then(function(response) { return response.json(); })
+        ]).then(function(results) {
+            var paths = results[0] || {};
+            var data = results[1] || {};
+            var root = document.getElementById('uploadConvertedRoot');
+            if (root) root.value = paths.converted || currentPaths.converted || '';
+            uploadState.folders = (data.sessions || []).map(function(folder) {
+                var identity = parseConvertedFolderIdentity(folder.id);
+                if (!identity) return null;
+                folder._date = identity.date;
+                folder._format = identity.format;
+                return folder;
+            }).filter(Boolean);
+            if (!uploadState.folders.some(function(folder) { return folder.path === uploadState.folderPath; })) {
+                uploadState.folderPath = '';
+                document.getElementById('uploadFolderPath').value = '';
+            }
+            buildUploadFilterOptions();
+            renderUploadFolders();
+            if (button) button.textContent = '刷新待上传文件';
+        }).catch(function(error) {
+            uploadState.folders = [];
+            if (list) list.innerHTML = '<div class="empty-state">读取转换结果失败，请检查转换目录</div>';
+            showToast(error.message || '无法读取待上传文件', 'error');
+        }).finally(function() {
+            if (button) button.disabled = false;
+        });
+    }
+
+    function renderUploadConfig(config) {
+        uploadState.config = config || null;
+        if (!config) return;
+        var minio = config.minio || {};
+        var fields = {
+            uploadApiBase: config.apiBase || '',
+            uploadUsername: config.username || '',
+            uploadCollector: config.collector || '',
+            uploadMinioEndpoint: minio.endpoint || '',
+            uploadMinioBucket: minio.bucket || ''
+        };
+        Object.keys(fields).forEach(function(id) {
+            var input = document.getElementById(id);
+            if (input && !input.value) input.value = fields[id];
+        });
+        var password = document.getElementById('uploadPassword');
+        var accessKey = document.getElementById('uploadMinioAccessKey');
+        var secretKey = document.getElementById('uploadMinioSecretKey');
+        if (password) password.placeholder = config.passwordConfigured ? '已保存，可直接登录' : '请输入平台密码';
+        if (accessKey) accessKey.placeholder = minio.accessKeyConfigured ? '已保存，可直接上传' : '请输入 MinIO 访问账号';
+        if (secretKey) secretKey.placeholder = minio.secretKeyConfigured ? '已保存，可直接上传' : '请输入 MinIO 访问密钥';
+    }
+
+    function updateUploadSummary() {
+        var folder = uploadState.folderPath || uploadFieldValue('uploadFolderPath');
+        var task = uploadState.tasks.filter(function(item) { return String(item.taskId) === uploadState.taskId; })[0];
+        var instance = uploadState.instances.filter(function(item) { return String(item.instanceId) === uploadState.instanceId; })[0];
+        var summary = document.getElementById('uploadSummary');
+        var folderName = document.getElementById('uploadFolderName');
+        var normalized = folder.replace(/[\\/]+$/, '');
+        var baseName = normalized ? normalized.split(/[\\/]/).pop() : '';
+        if (folderName) folderName.textContent = baseName ? baseName : '未选择文件夹';
+        if (summary) {
+            if (!uploadState.token) summary.textContent = '请先登录平台，再选择已发布采集任务。';
+            else if (!uploadState.taskId) summary.textContent = '已登录，请选择一个已发布采集任务。';
+            else if (!uploadState.instanceId) summary.textContent = '已选择任务「' + (task ? task.taskName : uploadState.taskId) + '」，请选择场景实例。';
+            else if (!baseName) summary.textContent = '已选择场景「' + (instance ? instance.sceneName : uploadState.instanceId) + '」，请选择一个转换结果文件夹。';
+            else summary.textContent = '将把已验证的转换结果「' + baseName + '」上传到训练平台并登记。';
+        }
+        var start = document.getElementById('uploadStartBtn');
+        if (start) start.disabled = !uploadState.token || !uploadState.taskId || !uploadState.instanceId || !baseName || uploadState.uploading;
+    }
+
+    function loadUploadConfig() {
+        return fetch('/api/eidp/config').then(function(response) { return response.json(); }).then(function(data) {
+            if (!data.ok) throw new Error(data.error || '读取本机配置失败');
+            renderUploadConfig(data.config);
+            updateUploadSummary();
+            return data;
+        }).catch(function(error) {
+            setUploadConnection('无法读取上传配置', 'error');
+            showToast(error.message || '平台上传组件不可用', 'error');
+        });
+    }
+
+    function buildUploadConfigPayload() {
+        return {
+            apiBase: uploadFieldValue('uploadApiBase'),
+            username: uploadFieldValue('uploadUsername'),
+            password: document.getElementById('uploadPassword').value,
+            collector: uploadFieldValue('uploadCollector'),
+            minioEndpoint: uploadFieldValue('uploadMinioEndpoint'),
+            minioBucket: uploadFieldValue('uploadMinioBucket'),
+            minioAccessKey: uploadFieldValue('uploadMinioAccessKey'),
+            minioSecretKey: document.getElementById('uploadMinioSecretKey').value
+        };
+    }
+
+    function validateUploadConfig(payload, requireStorage) {
+        var config = uploadState.config || {};
+        var minio = config.minio || {};
+        var checks = [
+            [payload.apiBase, '请输入平台地址', 'uploadApiBase'],
+            [payload.username, '请输入平台账号', 'uploadUsername'],
+            [payload.password || config.passwordConfigured, '请输入平台密码', 'uploadPassword'],
+            [payload.collector, '请输入采集员人员名称', 'uploadCollector']
+        ];
+        if (requireStorage) {
+            checks = checks.concat([
+                [payload.minioEndpoint, '请输入 MinIO 数据地址', 'uploadMinioEndpoint'],
+                [payload.minioBucket, '请输入 MinIO 存储桶名称', 'uploadMinioBucket'],
+                [payload.minioAccessKey || minio.accessKeyConfigured, '请输入 MinIO 访问账号', 'uploadMinioAccessKey'],
+                [payload.minioSecretKey || minio.secretKeyConfigured, '请输入 MinIO 访问密钥', 'uploadMinioSecretKey']
+            ]);
+        }
+        for (var index = 0; index < checks.length; index++) {
+            if (checks[index][0]) continue;
+            var input = document.getElementById(checks[index][2]);
+            if (input) input.focus();
+            showToast(checks[index][1], 'error');
+            return false;
+        }
+        return true;
+    }
+
+    function saveUploadConfig(showSuccess, requireStorage) {
+        var payload = buildUploadConfigPayload();
+        if (!validateUploadConfig(payload, !!requireStorage)) return Promise.resolve(null);
+        return uploadPost('/api/eidp/config', payload).then(function(data) {
+            if (!data.ok) throw new Error(data.error || '保存失败');
+            renderUploadConfig(data.config);
+            document.getElementById('uploadPassword').value = '';
+            document.getElementById('uploadMinioAccessKey').value = '';
+            document.getElementById('uploadMinioSecretKey').value = '';
+            if (showSuccess !== false) showToast('训练平台和 MinIO 配置已保存在本机', 'success');
+            return data;
+        });
+    }
+
+    function refreshUploadTasks() {
+        if (!uploadState.token) return;
+        var button = document.getElementById('uploadRefreshTasksBtn');
+        if (button) button.disabled = true;
+        uploadPost('/api/eidp/tasks', { token: uploadState.token }).then(function(data) {
+            if (!data.ok) throw new Error(data.error || '读取任务失败');
+            uploadState.tasks = data.records || [];
+            uploadState.taskId = '';
+            uploadState.instanceId = '';
+            uploadState.instances = [];
+            var taskSelect = document.getElementById('uploadTaskSelect');
+            var instanceSelect = document.getElementById('uploadInstanceSelect');
+            setUploadOptions(taskSelect, uploadState.tasks, 'taskId', function(item) {
+                return item.taskName + ' · ' + item.taskId;
+            }, uploadState.tasks.length ? '请选择已发布采集任务' : '未发现已发布采集任务');
+            taskSelect.disabled = uploadState.tasks.length === 0;
+            setUploadOptions(instanceSelect, [], 'instanceId', function() { return ''; }, '请先选择任务');
+            instanceSelect.disabled = true;
+            updateUploadSummary();
+            showToast('已加载 ' + uploadState.tasks.length + ' 个已发布任务', 'success');
+        }).catch(function(error) {
+            if (/401|登录|token/.test(error.message || '')) uploadState.token = '';
+            setUploadConnection('登录已失效或无法读取任务', 'error');
+            updateUploadSummary();
+            showToast(error.message || '读取平台任务失败', 'error');
+        }).finally(function() {
+            if (button) button.disabled = !uploadState.token;
+        });
+    }
+
+    function refreshUploadInstances() {
+        if (!uploadState.token || !uploadState.taskId) return;
+        var instanceSelect = document.getElementById('uploadInstanceSelect');
+        instanceSelect.disabled = true;
+        setUploadOptions(instanceSelect, [], 'instanceId', function() { return ''; }, '正在读取场景实例...');
+        uploadPost('/api/eidp/instances', { token: uploadState.token, taskId: uploadState.taskId }).then(function(data) {
+            if (!data.ok) throw new Error(data.error || '读取场景实例失败');
+            uploadState.instances = data.records || [];
+            uploadState.instanceId = '';
+            setUploadOptions(instanceSelect, uploadState.instances, 'instanceId', function(item) {
+                return item.sceneName + ' · ' + item.instanceId;
+            }, uploadState.instances.length ? '请选择场景实例' : '此任务没有可用场景实例');
+            instanceSelect.disabled = uploadState.instances.length === 0;
+            updateUploadSummary();
+        }).catch(function(error) {
+            setUploadOptions(instanceSelect, [], 'instanceId', function() { return ''; }, '读取场景实例失败');
+            showToast(error.message || '读取场景实例失败', 'error');
+            updateUploadSummary();
+        });
+    }
+
+    function loginUploadPlatform() {
+        var username = uploadFieldValue('uploadUsername');
+        var passwordEl = document.getElementById('uploadPassword');
+        var password = passwordEl ? passwordEl.value : '';
+        var button = document.getElementById('uploadLoginBtn');
+        button.disabled = true;
+        setUploadConnection('正在登录平台');
+        saveUploadConfig(false, false).then(function(saved) {
+            if (!saved) return null;
+            return uploadPost('/api/eidp/login', { username: username, password: password });
+        }).then(function(data) {
+            if (!data) {
+                setUploadConnection('未登录');
+                return;
+            }
+            if (!data.ok || !data.token) throw new Error(data.error || '登录失败');
+            uploadState.token = data.token;
+            uploadState.username = data.username || username;
+            passwordEl.value = '';
+            setUploadConnection('已登录 · ' + uploadState.username, 'online');
+            document.getElementById('uploadRefreshTasksBtn').disabled = false;
+            refreshUploadTasks();
+            updateUploadSummary();
+        }).catch(function(error) {
+            uploadState.token = '';
+            setUploadConnection('登录失败', 'error');
+            updateUploadSummary();
+            showToast(error.message || '平台登录失败', 'error');
+        }).finally(function() {
+            button.disabled = false;
+        });
+    }
+
+    function renderUploadResult(data) {
+        var result = document.getElementById('uploadResult');
+        if (!result) return;
+        if (data.error) {
+            result.innerHTML = '<div class="platform-result-row"><span>上传状态</span><strong class="platform-result-warning">失败：' + escapeHtml(data.error) + '</strong></div>';
+            return;
+        }
+        var html = '<div class="platform-result-row"><span>上传状态</span><strong class="platform-result-ok">已上传并登记待审核</strong></div>';
+        html += '<div class="platform-result-row"><span>审核记录</span><strong>' + escapeHtml(data.recordId || '--') + '</strong></div>';
+        html += '<div class="platform-result-row"><span>上传文件</span><strong>' + escapeHtml((data.filesDone || 0) + ' / ' + (data.filesTotal || 0)) + '</strong></div>';
+        (data.warnings || []).forEach(function(warning) {
+            html += '<div class="platform-result-row"><span>提示</span><strong class="platform-result-warning">' + escapeHtml(warning) + '</strong></div>';
+        });
+        result.innerHTML = html;
+    }
+
+    function updateUploadProgress(data) {
+        var panel = document.getElementById('uploadProgressPanel');
+        var fill = document.getElementById('uploadProgressFill');
+        var progress = Math.max(0, Math.min(1, Number(data.progress || 0)));
+        panel.style.display = '';
+        fill.style.width = Math.round(progress * 100) + '%';
+        fill.classList.toggle('active', !!data.uploading);
+        fill.classList.toggle('done', !data.uploading && !data.error && (data.finished || progress >= 1));
+        document.getElementById('uploadProgressText').textContent = Math.round(progress * 100) + '% · '
+            + (data.filesDone || 0) + ' / ' + (data.filesTotal || 0) + ' 个文件';
+        document.getElementById('uploadProgressStage').textContent = data.stage || (data.uploading ? '正在上传' : '等待上传');
+        document.getElementById('uploadProgressFile').textContent = data.file || '';
+        var error = document.getElementById('uploadError');
+        error.style.display = data.error ? '' : 'none';
+        error.textContent = data.error ? '错误：' + data.error : '';
+    }
+
+    function stopUploadPolling() {
+        if (uploadState.pollTimer) {
+            clearInterval(uploadState.pollTimer);
+            uploadState.pollTimer = null;
+        }
+    }
+
+    function pollUploadProgress() {
+        fetch('/api/eidp/upload/progress').then(function(response) { return response.json(); }).then(function(data) {
+            updateUploadProgress(data);
+            if (!data.uploading) {
+                uploadState.uploading = false;
+                stopUploadPolling();
+                updateUploadSummary();
+                if (data.error) {
+                    renderUploadResult(data);
+                    if (!uploadState.notified) showToast('平台上传失败：' + data.error, 'error');
+                } else if (data.finished || data.recordId) {
+                    renderUploadResult(data);
+                    if (!uploadState.notified) showToast('上传完成，已提交平台审核', 'success');
+                }
+                uploadState.notified = true;
+            }
+        }).catch(function() {});
+    }
+
+    function startPlatformUpload() {
+        var folderPath = uploadState.folderPath || uploadFieldValue('uploadFolderPath');
+        if (!uploadState.token || !uploadState.taskId || !uploadState.instanceId || !folderPath) {
+            showToast('请先完成平台登录、任务、场景和转换结果选择', 'error');
+            return;
+        }
+        saveUploadConfig(false, true).then(function(saved) {
+            if (!saved) return null;
+            uploadState.uploading = true;
+            uploadState.notified = false;
+            updateUploadSummary();
+            var error = document.getElementById('uploadError');
+            error.style.display = 'none';
+            document.getElementById('uploadProgressPanel').style.display = '';
+            updateUploadProgress({ uploading: true, stage: '正在提交上传任务', progress: 0, filesDone: 0, filesTotal: 0 });
+            return uploadPost('/api/eidp/upload', {
+                token: uploadState.token,
+                taskId: uploadState.taskId,
+                instanceId: uploadState.instanceId,
+                folderPath: folderPath
+            });
+        }).then(function(data) {
+            if (!data) return;
+            if (!data.ok || !data.started) throw new Error(data.error || '无法启动上传任务');
+            stopUploadPolling();
+            uploadState.pollTimer = setInterval(pollUploadProgress, 450);
+            pollUploadProgress();
+        }).catch(function(error) {
+            uploadState.uploading = false;
+            updateUploadSummary();
+            updateUploadProgress({ uploading: false, finished: true, stage: '上传失败', error: error.message });
+            renderUploadResult({ error: error.message });
+            showToast(error.message || '无法启动平台上传', 'error');
+        });
+    }
+
+    function bindUploadEvents() {
+        document.getElementById('uploadSaveConfigBtn').addEventListener('click', function() {
+            saveUploadConfig(true, true).catch(function(error) {
+                showToast(error.message || '保存平台配置失败', 'error');
+            });
+        });
+        document.getElementById('uploadLoginBtn').addEventListener('click', loginUploadPlatform);
+        document.getElementById('uploadRefreshTasksBtn').addEventListener('click', refreshUploadTasks);
+        document.getElementById('uploadTaskSelect').addEventListener('change', function() {
+            uploadState.taskId = this.value;
+            uploadState.instanceId = '';
+            uploadState.instances = [];
+            refreshUploadInstances();
+            updateUploadSummary();
+        });
+        document.getElementById('uploadInstanceSelect').addEventListener('change', function() {
+            uploadState.instanceId = this.value;
+            updateUploadSummary();
+        });
+        document.getElementById('uploadBrowseBtn').addEventListener('click', loadUploadFolders);
+        document.getElementById('uploadFilterYear').addEventListener('change', function() {
+            uploadState.filterYear = +this.value;
+            uploadState.filterDay = 0;
+            buildUploadFilterOptions();
+            renderUploadFolders();
+        });
+        document.getElementById('uploadFilterMonth').addEventListener('change', function() {
+            uploadState.filterMonth = +this.value;
+            uploadState.filterDay = 0;
+            buildUploadFilterOptions();
+            renderUploadFolders();
+        });
+        document.getElementById('uploadFilterDay').addEventListener('change', function() {
+            uploadState.filterDay = +this.value;
+            renderUploadFolders();
+        });
+        document.getElementById('uploadFilterFormat').addEventListener('change', function() {
+            uploadState.filterFormat = this.value;
+            renderUploadFolders();
+        });
+        document.getElementById('uploadStartBtn').addEventListener('click', startPlatformUpload);
+        document.getElementById('uploadOpenPlatformBtn').addEventListener('click', function() {
+            var apiBase = uploadFieldValue('uploadApiBase') || (uploadState.config && uploadState.config.apiBase);
+            if (apiBase) window.open(apiBase, '_blank', 'noopener');
+        });
+    }
+
+    function initPlatformUploadPage() {
+        if (!uploadState.initialized) {
+            uploadState.initialized = true;
+            bindUploadEvents();
+            loadUploadConfig();
+            loadUploadFolders();
+        } else {
+            updateUploadSummary();
+        }
+        pollUploadProgress();
+    }
 
     // ---- Gripper Control Page ----
     var gripPollTimer = null;
@@ -3083,6 +3604,7 @@
         // 避免回监控页时刚调过参的那台相机被 off 覆盖而黑屏（需手动重开开关才恢复）。
         if (pageName !== 'camera') stopCameraControlPreview();
         if (currentPage === 'collect') closeCollectPointCloud();
+        if (currentPage === 'upload' && pageName !== 'upload') stopUploadPolling();
         origSwitchPage(pageName);
         if (pageName === 'control') {
             fetchGripperStatus();
@@ -3101,6 +3623,9 @@
         }
         if (pageName === 'camera') {
             initCameraControlPage();
+        }
+        if (pageName === 'upload') {
+            initPlatformUploadPage();
         }
         if (pageName === 'collect') openCollectPointCloud();
         if (pageName === 'rps') {

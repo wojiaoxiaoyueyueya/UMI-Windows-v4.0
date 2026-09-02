@@ -39,6 +39,7 @@
             <button class="nav-tab active" data-page="monitor">夹爪监控</button>
             <button class="nav-tab" data-page="collect">数据采集</button>
             <button class="nav-tab" data-page="convert">数据转换</button>
+            <button class="nav-tab" data-page="upload">平台上传</button>
             <button class="nav-tab" data-page="camera">相机控制</button>
             <button class="nav-tab" data-page="control">夹爪控制</button>
             <button class="nav-tab" data-page="electric">电动夹爪控制</button>
@@ -334,20 +335,11 @@
                     <label class="toggle-row" style="flex-direction:column;align-items:stretch;gap:6px;">
                         <span class="toggle-label">目标格式</span>
                         <select id="convertFormat" class="convert-input" style="padding:6px 8px;">
-                            <option value="lerobot">LeRobot v3.0（训练校验）</option>
-                            <option value="hdf5">HDF5 v1.0（观测归档）</option>
-                            <option value="rlds">RLDS v0.1（观测归档）</option>
+                            <option value="lerobot">LeRobot v3.0</option>
+                            <option value="hdf5">HDF5 v1.0</option>
+                            <option value="rlds">RLDS v0.1</option>
                         </select>
                     </label>
-                    <label class="toggle-row" style="flex-direction:column;align-items:stretch;gap:6px;">
-                        <span class="toggle-label">任务指令</span>
-                        <input type="text" id="convertTask" class="convert-input"
-                               placeholder="例如：将红色方块放入收纳盒">
-                    </label>
-                    <div class="convert-contract-note">
-                        LeRobot 训练转换只接受真实控制动作，不会用全零数据补齐。源会话需包含
-                        <span class="inline-code">action_data/actions.csv</span>。
-                    </div>
                 </div>
                 <div class="sidebar-section">
                     <button class="record-btn" id="convertBrowseBtn">浏览会话</button>
@@ -387,6 +379,132 @@
                         <div class="empty-state">暂无转换记录</div>
                     </div>
                 </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- Page: 平台上传 -->
+    <div class="page" id="page-upload" style="display:none">
+        <div class="platform-upload-layout">
+            <aside class="platform-upload-sidebar" id="sidebar-upload">
+                <section class="sidebar-section">
+                    <div class="sidebar-title">登录训练平台</div>
+                    <div class="platform-connection-state" id="uploadConnectionState">
+                        <span class="platform-state-dot"></span><span id="uploadConnectionText">未登录</span>
+                    </div>
+                    <label class="platform-field">
+                        <span>平台地址</span>
+                        <input class="convert-input" id="uploadApiBase" type="text" required placeholder="请输入平台地址">
+                    </label>
+                    <label class="platform-field">
+                        <span>平台账号</span>
+                        <input class="convert-input" id="uploadUsername" type="text" required autocomplete="username" placeholder="请输入平台账号">
+                    </label>
+                    <label class="platform-field">
+                        <span>平台密码</span>
+                        <input class="convert-input" id="uploadPassword" type="password" required autocomplete="current-password" placeholder="请输入平台密码">
+                    </label>
+                    <label class="platform-field">
+                        <span>采集员人员名称</span>
+                        <input class="convert-input" id="uploadCollector" type="text" required placeholder="张三">
+                    </label>
+                    <button class="record-btn" id="uploadLoginBtn">登录训练平台</button>
+                </section>
+
+                <section class="sidebar-section">
+                    <div class="sidebar-title">MinIO 文件存储</div>
+                    <label class="platform-field">
+                        <span>MinIO 数据地址</span>
+                        <input class="convert-input" id="uploadMinioEndpoint" type="text" required placeholder="http://服务器地址:19000">
+                    </label>
+                    <label class="platform-field">
+                        <span>存储桶名称</span>
+                        <input class="convert-input" id="uploadMinioBucket" type="text" required placeholder="请输入存储桶名称">
+                    </label>
+                    <label class="platform-field">
+                        <span>访问账号</span>
+                        <input class="convert-input" id="uploadMinioAccessKey" type="text" required autocomplete="off" placeholder="请输入 MinIO 访问账号">
+                    </label>
+                    <label class="platform-field">
+                        <span>访问密钥</span>
+                        <input class="convert-input" id="uploadMinioSecretKey" type="password" required autocomplete="off" placeholder="请输入 MinIO 访问密钥">
+                    </label>
+                    <button class="record-btn" id="uploadSaveConfigBtn">保存本机配置</button>
+                </section>
+
+                <section class="sidebar-section">
+                    <div class="sidebar-title">任务与场景</div>
+                    <label class="platform-field">
+                        <span>已发布采集任务</span>
+                        <select class="convert-input" id="uploadTaskSelect" disabled>
+                            <option value="">请先登录平台</option>
+                        </select>
+                    </label>
+                    <label class="platform-field">
+                        <span>场景实例</span>
+                        <select class="convert-input" id="uploadInstanceSelect" disabled>
+                            <option value="">请先选择任务</option>
+                        </select>
+                    </label>
+                    <button class="record-btn" id="uploadRefreshTasksBtn" disabled>刷新已发布任务</button>
+                </section>
+
+                <section class="sidebar-section">
+                    <div class="sidebar-title">转换数据</div>
+                    <label class="platform-field">
+                        <span>固定转换目录</span>
+                        <input class="convert-input" id="uploadConvertedRoot" type="text" readonly placeholder="正在读取转换目录">
+                    </label>
+                    <input id="uploadFolderPath" type="hidden">
+                    <button class="record-btn" id="uploadBrowseBtn">浏览待上传文件</button>
+                    <button class="record-btn" id="uploadStartBtn" disabled>上传到平台</button>
+                    <button class="record-btn" id="uploadOpenPlatformBtn">打开训练平台</button>
+                </section>
+            </aside>
+
+            <main class="platform-upload-main">
+                <section class="collect-status-panel">
+                    <div class="status-header platform-upload-list-header">
+                        <span>待上传文件夹 <span id="uploadFolderCount" class="platform-upload-count"></span></span>
+                        <div class="platform-upload-filters" id="uploadFilterBar" style="display:none">
+                            <select class="convert-input" id="uploadFilterYear"><option value="0">全部年份</option></select>
+                            <select class="convert-input" id="uploadFilterMonth"><option value="0">全部月份</option></select>
+                            <select class="convert-input" id="uploadFilterDay"><option value="0">全部日期</option></select>
+                            <select class="convert-input" id="uploadFilterFormat">
+                                <option value="all">全部格式</option>
+                                <option value="lerobot">LeRobot</option>
+                                <option value="hdf5">HDF5</option>
+                                <option value="rlds">RLDS</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="convert-session-list platform-folder-list" id="uploadFolderList">
+                        <div class="empty-state">点击“浏览待上传文件”加载转换结果</div>
+                    </div>
+                    <div class="platform-upload-summary" id="uploadSummary">
+                        登录后选择任务、场景实例和一个转换结果文件夹。
+                    </div>
+                </section>
+
+                <section class="collect-status-panel" id="uploadProgressPanel" style="display:none">
+                    <div class="status-header">上传进度</div>
+                    <div class="convert-progress-info">
+                        <span id="uploadProgressText">0% · 0 / 0 个文件</span>
+                        <span id="uploadProgressStage">等待上传</span>
+                    </div>
+                    <div class="convert-progress-bar">
+                        <div class="convert-progress-fill" id="uploadProgressFill"></div>
+                    </div>
+                    <div class="platform-upload-file" id="uploadProgressFile"></div>
+                    <div id="uploadError" class="convert-error" style="display:none"></div>
+                </section>
+
+                <section class="collect-history-panel">
+                    <div class="status-header">上传结果</div>
+                    <div class="platform-result" id="uploadResult">
+                        <div class="empty-state">上传完成后会在这里显示训练平台登记结果。</div>
+                    </div>
+                </section>
             </main>
         </div>
     </div>

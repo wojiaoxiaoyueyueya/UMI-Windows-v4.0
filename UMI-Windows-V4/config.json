@@ -8,6 +8,21 @@
         "convertOutputDir": "data_converted",
         "convertScript": "tools/convert_to_lerobot.py"
     },
+    "eidp": {
+        "apiBase": "",
+        "username": "",
+        "password": "",
+        "org": "umi",
+        "collector": "",
+        "dataType": "1",
+        "minio": {
+            "endpoint": "",
+            "accessKey": "",
+            "secretKey": "",
+            "bucket": "",
+            "region": "us-east-1"
+        }
+    },
     "camera": {
         "fisheyeK1": -1.0,
         "fisheyeK2": 0.4,

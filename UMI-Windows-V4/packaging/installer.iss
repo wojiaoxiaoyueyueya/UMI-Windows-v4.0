@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "4.3.3"
+  #define AppVersion "4.4.0"
 #endif
 
 #define AppName "UMI 数据采集平台"

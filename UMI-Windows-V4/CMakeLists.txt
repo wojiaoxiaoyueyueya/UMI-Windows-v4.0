@@ -85,6 +85,7 @@ set(SOURCES
     src/http/HttpServer.cpp
     src/http/HttpServerRoutes.cpp
     src/http/HttpServerRecording.cpp
+    src/http/HttpServerUpload.cpp
     src/UmiGripper.cpp
     src/ElectricGripper.cpp
     src/HikCamera.cpp

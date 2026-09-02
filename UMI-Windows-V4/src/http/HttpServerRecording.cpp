@@ -1119,6 +1119,11 @@ bool HttpServer::startConversion(const std::string& sourceDir,
                 arguments.push_back("--task");
                 arguments.push_back(task);
             }
+            // 采集平台负责格式转换，不要求用户额外填写训练任务或提供动作文件。
+            // 有真实 action 数据时转换器仍会完整导出；没有时生成观测数据集。
+            if (format == "lerobot") {
+                arguments.push_back("--allow-observation-only");
+            }
             arguments.push_back("--progress");
             arguments.push_back(progressPath);
 
@@ -1132,7 +1137,7 @@ bool HttpServer::startConversion(const std::string& sourceDir,
             }
             std::lock_guard<std::mutex> lk(convertState_.mutex);
             if (ret != 0) {
-                // Python 转换器会把可读的校验原因写入进度文件，优先展示给用户。
+                // Python 转换器会把可读的失败原因写入进度文件，优先展示给用户。
                 std::string detail;
                 const std::string progressJson = winfs::readFileToString(progressPath);
                 if (!progressJson.empty()) detail = json::extractStr(progressJson, "error");

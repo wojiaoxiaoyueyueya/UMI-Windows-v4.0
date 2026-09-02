@@ -17,6 +17,7 @@
 | `src/http/HttpServer.cpp` | HTTP 服务生命周期、MJPEG 编码循环、实时状态更新。 |
 | `src/http/HttpServerRoutes.cpp` | REST API、静态页面、MJPEG 流、设备控制接口。 |
 | `src/http/HttpServerRecording.cpp` | 录制、保存、时间戳、metadata、异步收尾和数据转换调度。 |
+| `src/http/HttpServerUpload.cpp` | 平台上传进程调度、配置脱敏、本机私有配置、进度文件和上传任务状态。 |
 | `src/utils/JsonHelper.cpp` | JSON 响应等通用工具。 |
 
 ## 头文件
@@ -25,7 +26,7 @@
 | --- | --- |
 | `include/ICamera.hpp` | 相机统一接口，抽象海康和 Orbbec。 |
 | `include/IGripper.hpp` | 夹爪统一接口。 |
-| `include/HttpServer.hpp` | HTTP 服务、流状态、录制状态、转换状态的数据结构。 |
+| `include/HttpServer.hpp` | HTTP 服务、流状态、录制状态、转换状态和平台上传状态的数据结构。 |
 | `include/DeviceManager.hpp` | 设备管理器接口和槽位结构。 |
 | `include/*Camera.hpp` | 具体相机类声明。 |
 | `include/*Gripper.hpp` | 具体夹爪类声明。 |
@@ -39,7 +40,7 @@
 | `frontend/dashboard.html` | 数据看板入口。 |
 | `frontend/dashboard.js` | 数据看板逻辑，读取历史会话、转换结果、删除数据。 |
 | `frontend/dashboard.css` | 数据看板样式。 |
-| `frontend/script.js` | 采集控制台逻辑，包括设备状态、视频流、录制、转换、夹爪控制、剪刀石头布和槽位映射同步。 |
+| `frontend/script.js` | 采集控制台逻辑，包括设备状态、视频流、录制、转换、平台上传、夹爪控制、剪刀石头布和槽位映射同步。 |
 | `frontend/trajectory3d.js` | 空间位姿页的 Three.js 源码、轨迹倍率、夹爪与相机模型、稀疏点云、交互控制和闭合动画。 |
 | `frontend/trajectory3d.bundle.js` | 已打包的离线三维运行脚本，普通用户不需要 Node.js。 |
 | `frontend/assets/models/umi-gripper.glb` | 浏览器运行时使用的手动夹爪与真实鱼眼相机完整三维装配。 |
@@ -54,6 +55,7 @@
 | `tools/convert_to_hdf5.py` | 原始会话转换为 HDF5 数据集。 |
 | `tools/convert_to_rlds.py` | 原始会话转换为 RLDS/TFRecord 风格数据。 |
 | `tools/convert_gripper_step.py` | 校验夹爪、鱼眼相机壳体和镜头的外部 STEP 依赖，并将完整装配转换为网页 GLB。 |
+| `tools/upload_to_eidp.py` | 数据训练平台登录、任务/场景查询、固定转换结果校验、文件上传及审核记录登记。 |
 | `collect_dlls.ps1` | CMake 构建后自动递归收集并校验运行时 DLL，也可由开发者手动复核。 |
 
 ## 第三方依赖目录
@@ -71,6 +73,8 @@
 | --- | --- | --- |
 | `data_capture/` | 原始采集会话。 | 不提交。 |
 | `data_converted/` | 转换后的训练数据。 | 不提交。 |
+| `data_upload_staging/` | 上传过程中的临时任务、结果和最小关节文件。 | 不提交。 |
+| `config.local.json` | 本机训练平台、采集员和 MinIO 私有配置。 | 不提交。 |
 | `build/` | exe、DLL、构建缓存和日志。 | 不提交。 |
 
 ## 维护规则

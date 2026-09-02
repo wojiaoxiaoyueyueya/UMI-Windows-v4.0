@@ -198,13 +198,13 @@
             <div>
                 <div class="eyebrow">WINDOWS CURRENT RELEASE</div>
                 <h1>UMI Windows V4 数据采集平台</h1>
-                <p class="lead">面向 UMI V4.0 手动夹爪、多相机和 CAN 电动夹爪的一体化本地采集系统，覆盖设备检测、实时预览、视觉惯性三维轨迹、统一时间戳录制、控制联动、历史会话和数据转换。</p>
+                <p class="lead">面向 UMI V4.0 手动夹爪、多相机和 CAN 电动夹爪的一体化本地采集系统，覆盖设备检测、实时预览、视觉惯性三维轨迹、统一时间戳录制、控制联动、历史会话、数据转换和训练平台上传。</p>
             </div>
             <div class="version-panel">
                 <span>当前稳定版本</span>
-                <strong>4.3.3</strong>
+                <strong>4.4.0</strong>
                 <div class="version-meta">
-                    <div><span>发布日期</span><b>2026-08-26</b></div>
+                    <div><span>发布日期</span><b>2026-09-02</b></div>
                     <div><span>协议代际</span><b>UMI V4.0</b></div>
                 </div>
             </div>
@@ -226,8 +226,9 @@
                 <article class="module"><span class="module-index">01</span><h3>多模态采集</h3><p>彩色、深度、双红外、点云、夹爪、IMU 和设备状态统一写入会话。</p></article>
                 <article class="module"><span class="module-index">02</span><h3>设备控制</h3><p>相机参数、手动夹爪 V4 数据、CAN 电动夹爪和夹爪遥控集中操作。</p></article>
                 <article class="module"><span class="module-index">03</span><h3>时间同步</h3><p>视频帧、夹爪、IMU 和动作使用同一会话时间基准，保留逐帧时间戳。</p></article>
-                <article class="module"><span class="module-index">04</span><h3>数据交付</h3><p>提供 LeRobot、HDF5、RLDS 输出，并区分训练就绪与观察归档数据。</p></article>
+                <article class="module"><span class="module-index">04</span><h3>数据交付</h3><p>在本地生成 LeRobot、HDF5、RLDS 三种格式，转换结果集中保存在独立目录。</p></article>
                 <article class="module"><span class="module-index">05</span><h3>空间位姿</h3><p>融合左右手画面与 V4 IMU，提供相对三维轨迹、完整夹爪与鱼眼相机 STEP 模型、闭合动画、视锥和稀疏视觉特征点。</p></article>
+                <article class="module"><span class="module-index">06</span><h3>平台上传</h3><p>筛选并选择本地转换结果，上传至已发布任务和场景实例，自动登记待审核记录。</p></article>
             </div>
         </section>
 
@@ -256,6 +257,8 @@
                 <p>早期里程碑版本号为项目整理时补充</p>
             </div>
             <div class="release-list">
+                <div class="release-version"><strong>4.4.0</strong><span>2026-09-02</span></div>
+                <div class="release-body"><h3>训练平台上传与审核登记</h3><p>新增统一风格的平台上传页，只显示固定转换目录中名称与数据结构均通过校验的 LeRobot、HDF5、RLDS 结果。文件上传至用户配置的 MinIO 后，自动在训练平台创建待审核记录；本机私有配置全程脱敏。</p></div>
                 <div class="release-version"><strong>4.3.3</strong><span>2026-08-26</span></div>
                 <div class="release-body"><h3>真实鱼眼装配与位姿方向修复</h3><p>导入完整鱼眼相机壳体和镜头 STEP 零件，视锥从真实镜头向前展开；修正前后、上下和 IMU 安装轴映射，抑制上下运动的深度串扰，并解决启动校准阶段模型偶尔不响应旋转的问题。</p></div>
                 <div class="release-version"><strong>4.3.2</strong><span>2026-08-26</span></div>
@@ -283,8 +286,8 @@
             </div>
         </div>
 
-        <footer>UMI Data Capture Platform 4.3.3</footer>
+        <footer>UMI Data Capture Platform 4.4.0</footer>
     </main>
-    <script src="/service-lifecycle.js?v=20260826process"></script>
+    <script src="/service-lifecycle.js?v=20260902upload"></script>
 </body>
 </html>

@@ -249,6 +249,16 @@ struct ConvertState {
     std::vector<std::string> skippedSessions;
 };
 
+// 平台上传任务状态。上传由独立 Python 进程执行，C++ 服务只负责调度和
+// 向前端转发进度文件，避免大文件上传阻塞相机采集、录制或 HTTP 推流。
+struct PlatformUploadState {
+    std::mutex mutex;
+    bool uploading = false;
+    std::string progressPath;
+    std::string resultPath;
+    std::string error;
+};
+
 // 保存任务队列：每次 stopRecording 入队一个 FinalizeTask，
 // finalizeWorker 按顺序逐个处理，实现"第一个保存完第二个才开始"。
 struct FinalizeTask {
@@ -344,6 +354,7 @@ private:
     PoseState poseState_;
     RecordingState recordingState_;
     ConvertState convertState_;
+    PlatformUploadState platformUploadState_;
     std::map<std::string, UmiGripper*> umiGrippers_;  // slot -> gripper pointer (non-owning)
     std::map<std::string, ElectricGripper*> electricGrippers_;  // slot -> electric gripper (non-owning)
     mutable std::mutex gripperRefsMutex_;  // 保护热插拔更新和 HTTP 工作线程读取的非拥有指针
@@ -359,6 +370,11 @@ private:
     std::string convertOutputDir_;
     mutable std::mutex pathConfigMutex_;
     std::thread convertThread_;
+    std::thread platformUploadThread_;
+    std::string eidpScriptPath_;
+    std::string eidpConfigPath_;
+    std::string eidpLocalConfigPath_;
+    std::string eidpWorkDir_;
 
     // 保存任务队列：排队保存，第一个完成后第二个开始
     std::mutex finalizeQueueMutex_;
@@ -392,6 +408,9 @@ private:
     bool startConversion(const std::string& sourceDir, const std::vector<std::string>& sessions,
                           const std::string& task, const std::string& outputDir = "",
                           const std::string& format = "lerobot");
+    std::string runPlatformAction(const std::string& action, const std::string& payload, int& exitCode);
+    bool startPlatformUpload(const std::string& payload, std::string& error);
+    std::string getPlatformUploadProgress();
     bool startRecording(const std::vector<std::string>& types,
                         const std::vector<std::string>& slots = {},
                         const std::vector<std::string>& streams = {},

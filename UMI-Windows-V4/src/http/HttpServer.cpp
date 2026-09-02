@@ -40,6 +40,12 @@ HttpServer::HttpServer(const Config& cfg, const std::string& frontendDir)
     convertState_.converting = false;
     convertScriptPath_ = winfs::resolvePath(frontendDir_ + "/../" + cfg.paths.convertScript);
     convertOutputDir_ = winfs::resolvePath(frontendDir_ + "/../" + cfg.paths.convertOutputDir);
+    // 平台上传的认证信息放在 config.local.json。该文件不进 Git，也不会被
+    // HTTP 接口原样返回；前端只能得到脱敏后的连接状态。
+    eidpScriptPath_ = winfs::resolvePath(frontendDir_ + "/../tools/upload_to_eidp.py");
+    eidpConfigPath_ = winfs::resolvePath(frontendDir_ + "/../config.json");
+    eidpLocalConfigPath_ = winfs::resolvePath(frontendDir_ + "/../config.local.json");
+    eidpWorkDir_ = winfs::resolvePath(frontendDir_ + "/../data_upload_staging");
     ENCODE_INTERVAL_MS = cfg.stream.encodeIntervalMs;
     STREAM_INTERVAL_MS = cfg.stream.streamIntervalMs;
     JPEG_QUALITY = cfg.stream.jpegQuality;
@@ -118,6 +124,7 @@ void HttpServer::stop() {
     if (httpThread_.joinable()) httpThread_.join();
     if (encodeThread_.joinable()) encodeThread_.join();
     if (convertThread_.joinable()) convertThread_.join();
+    if (platformUploadThread_.joinable()) platformUploadThread_.join();
     if (finalizeWorkerThread_.joinable()) finalizeWorkerThread_.join();
     colorEnabled_ = false;
     gripperEnabled_ = false;

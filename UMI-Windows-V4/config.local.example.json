@@ -1,0 +1,16 @@
+{
+  "eidp": {
+    "apiBase": "",
+    "username": "",
+    "password": "",
+    "org": "umi",
+    "collector": "",
+    "minio": {
+      "endpoint": "",
+      "accessKey": "",
+      "secretKey": "",
+      "bucket": "",
+      "region": "us-east-1"
+    }
+  }
+}

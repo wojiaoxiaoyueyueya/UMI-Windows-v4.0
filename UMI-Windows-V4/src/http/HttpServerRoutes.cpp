@@ -652,6 +652,61 @@ void HttpServer::setupRoutes() {
         json::sendJson(res, json);
     });
 
+    // ---- 云端数据平台上传 ----
+    // 登录、任务查询和文件传输都委托给本地 Python 工具。HTTP 层只转发
+    // JSON 结果，避免浏览器保存部署凭据或直接与云端建立跨域连接。
+    svr_->Get("/api/eidp/config", [this](const httplib::Request&, httplib::Response& res) {
+        int exitCode = 1;
+        json::sendJson(res, runPlatformAction("public_config", "{}", exitCode));
+    });
+
+    svr_->Post("/api/eidp/config", [this](const httplib::Request& req, httplib::Response& res) {
+        if (req.body.size() > 16 * 1024) {
+            res.status = 413;
+            json::sendJson(res, "{\"ok\":false,\"error\":\"配置内容过大\"}");
+            return;
+        }
+        int exitCode = 1;
+        json::sendJson(res, runPlatformAction("save_config", req.body, exitCode));
+    });
+
+    svr_->Post("/api/eidp/login", [this](const httplib::Request& req, httplib::Response& res) {
+        if (req.body.size() > 16 * 1024) {
+            res.status = 413;
+            json::sendJson(res, "{\"ok\":false,\"error\":\"登录请求过大\"}");
+            return;
+        }
+        int exitCode = 1;
+        json::sendJson(res, runPlatformAction("login", req.body, exitCode));
+    });
+
+    svr_->Post("/api/eidp/tasks", [this](const httplib::Request& req, httplib::Response& res) {
+        int exitCode = 1;
+        json::sendJson(res, runPlatformAction("tasks", req.body, exitCode));
+    });
+
+    svr_->Post("/api/eidp/instances", [this](const httplib::Request& req, httplib::Response& res) {
+        int exitCode = 1;
+        json::sendJson(res, runPlatformAction("instances", req.body, exitCode));
+    });
+
+    svr_->Post("/api/eidp/upload", [this](const httplib::Request& req, httplib::Response& res) {
+        if (req.body.size() > 64 * 1024) {
+            res.status = 413;
+            json::sendJson(res, "{\"ok\":false,\"error\":\"上传请求过大\"}");
+            return;
+        }
+        std::string error;
+        const bool started = startPlatformUpload(req.body, error);
+        json::sendJson(res, started
+            ? "{\"ok\":true,\"started\":true}"
+            : "{\"ok\":false,\"error\":\"" + json::escape(error) + "\"}");
+    });
+
+    svr_->Get("/api/eidp/upload/progress", [this](const httplib::Request&, httplib::Response& res) {
+        json::sendJson(res, getPlatformUploadProgress());
+    });
+
     // 路径配置
     svr_->Get("/api/paths", [this](const httplib::Request&, httplib::Response& res) {
         const std::string collectDir = getRecordingBaseDir();

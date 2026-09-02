@@ -194,7 +194,7 @@ ManualGripper/
 │     ├─ HttpServer.cpp           实时状态与图像编码
 │     ├─ HttpServerRoutes.cpp     HTTP 路由
 │     └─ HttpServerRecording.cpp  录制、收尾、时间戳和转换
-├─ tools/                         Python 数据转换脚本
+├─ tools/                         Python 数据转换与平台上传脚本
 ├─ lib/                           厂商 SDK 和运行库
 ├─ docs/                          开发、部署与结构文档
 ├─ data_capture/                  原始会话，不提交
@@ -280,9 +280,13 @@ extra
 | `stream.jpegQuality` | 预览 JPEG 质量 |
 | `stream.streamMaxWidth` | 预览缩放最大宽度 |
 | `stream.frameSkipMs` | 页面发布帧间隔 |
+| `eidp.apiBase` | 数据训练平台 API 地址，可公开配置 |
+| `eidp.minio.endpoint/bucket/region` | MinIO S3 数据地址、存储桶和区域；公开配置默认留空 |
 | `slam.enabled/depthScale` | SLAM 开关和深度比例 |
 
 修改配置后需要重启服务。相机控制页面通过 API 实时修改的参数只影响当前运行状态，是否持久化应由配置保存逻辑明确处理，不能默认认为已写入 `config.json`。
+
+平台和 MinIO 私有字段由使用者在网页填写，并仅写入被 Git 忽略的 `config.local.json`。`GET /api/eidp/config` 只能返回密码及密钥是否已配置，绝不能返回明文。公开 `config.json`、示例配置、安装包和 Git 历史中必须保持凭据为空。无人值守部署也可用 `UMI_STORAGE_ENDPOINT`、`UMI_STORAGE_BUCKET`、`UMI_STORAGE_ACCESS_KEY`、`UMI_STORAGE_SECRET_KEY` 和可选的 `UMI_STORAGE_REGION` 覆盖本机 MinIO 配置。
 
 ## 10. HTTP 接口
 
@@ -311,6 +315,12 @@ extra
 | `POST /api/data/delete` | 删除指定会话 |
 | `POST /api/convert` | 启动数据转换 |
 | `GET /api/convert/progress` | 转换进度 |
+| `GET/POST /api/eidp/config` | 读取脱敏的平台上传配置或仅保存到本机私有配置 |
+| `POST /api/eidp/login` | 登录训练平台，返回短期内存令牌 |
+| `POST /api/eidp/tasks` | 查询已发布采集任务 |
+| `POST /api/eidp/instances` | 查询任务下场景实例 |
+| `POST /api/eidp/upload` | 异步上传目录并创建、提交审核记录 |
+| `GET /api/eidp/upload/progress` | 读取上传进度和结果 |
 
 修改 API 时同步检查 `frontend/script.js`、`frontend/dashboard.js` 和说明文档。删除数据、浏览路径等接口必须继续使用后端路径边界校验，不能仅依赖前端隐藏按钮。
 
