@@ -13,7 +13,7 @@
 | `src/OrbbecCamera.cpp` | Orbbec 相机封装，负责彩色、深度、红外、点云回调。 |
 | `src/UmiGripper.cpp` | UMI 手动夹爪串口通信、按钮、位置和 LED 控制。 |
 | `src/ElectricGripper.cpp` | 电动夹爪通信，支持 GCAN USBCAN 和 ESP32-CAN 串口桥，负责位置/速度/电流控制和状态解析。 |
-| `src/HandPoseManager.cpp` | 左右手视觉惯性跟踪，融合相机光流、V4 IMU、闭合度，并在双手共同静止时执行协同零速度约束。 |
+| `src/HandPoseManager.cpp` | 左右手独立视觉惯性跟踪，分别融合对应相机光流、V4 IMU 和闭合度，并独立执行静止约束与原点重定位。 |
 | `src/http/HttpServer.cpp` | HTTP 服务生命周期、MJPEG 编码循环、实时状态更新。 |
 | `src/http/HttpServerRoutes.cpp` | REST API、静态页面、MJPEG 流、设备控制接口。 |
 | `src/http/HttpServerRecording.cpp` | 录制、保存、时间戳、metadata、异步收尾和数据转换调度。 |

@@ -151,6 +151,8 @@ void HttpServer::registerClientHeartbeat(const std::string& clientId) {
     clientTrackingStarted_ = true;
     clientHeartbeats_[clientId] = now;
     noClientSince_ = std::chrono::steady_clock::time_point();
+    noClientAfterExplicitRelease_ = false;
+    lifecycleShutdownLogged_ = false;
 }
 
 void HttpServer::releaseClient(const std::string& clientId) {
@@ -161,6 +163,8 @@ void HttpServer::releaseClient(const std::string& clientId) {
     if (clientTrackingStarted_ && clientHeartbeats_.empty()
         && noClientSince_ == std::chrono::steady_clock::time_point()) {
         noClientSince_ = std::chrono::steady_clock::now();
+        noClientAfterExplicitRelease_ = true;
+        lifecycleShutdownLogged_ = false;
     }
 }
 
@@ -171,9 +175,10 @@ bool HttpServer::shouldShutdownForClientLifecycle() {
     if (!clientTrackingStarted_) return false;
 
     const auto now = std::chrono::steady_clock::now();
-    // 正常关页会主动 release，并在 3 秒宽限后退出。浏览器被强制结束时收不到
-    // pagehide/beforeunload，因此以三个心跳周期作为兜底，避免设备继续占用两分钟。
-    const auto staleAfter = std::chrono::seconds(15);
+    // 正常关页会主动 release 并快速退出。设备拔插时 Windows/相机 SDK 可能阻塞
+    // 数十秒，因此心跳超时必须足够长，不能把 USB 重新枚举误判成浏览器关闭。
+    // 浏览器崩溃收不到 release 时，约两分钟后再兜底回收后台。
+    const auto staleAfter = std::chrono::seconds(120);
     for (auto it = releasedClients_.begin(); it != releasedClients_.end();) {
         if (now - it->second > std::chrono::seconds(15)) {
             it = releasedClients_.erase(it);
@@ -191,15 +196,31 @@ bool HttpServer::shouldShutdownForClientLifecycle() {
 
     if (!clientHeartbeats_.empty()) {
         noClientSince_ = std::chrono::steady_clock::time_point();
+        noClientAfterExplicitRelease_ = false;
+        lifecycleShutdownLogged_ = false;
         return false;
     }
     if (noClientSince_ == std::chrono::steady_clock::time_point()) {
         noClientSince_ = now;
+        noClientAfterExplicitRelease_ = false;
+        lifecycleShutdownLogged_ = false;
         return false;
     }
 
     // 页面刷新或站内跳转会短暂释放旧页面，保留几秒让新页面重新登记。
-    return now - noClientSince_ >= std::chrono::seconds(3);
+    // 心跳超时已经等待了 120 秒，再留 5 秒接受延迟到达的心跳。
+    const auto grace = noClientAfterExplicitRelease_
+        ? std::chrono::seconds(3)
+        : std::chrono::seconds(5);
+    if (now - noClientSince_ < grace) return false;
+
+    if (!lifecycleShutdownLogged_) {
+        fprintf(stderr, noClientAfterExplicitRelease_
+            ? "[生命周期] 最后一个网页已主动关闭，准备退出后台\n"
+            : "[生命周期] 网页心跳连续中断超过 120 秒，准备回收后台\n");
+        lifecycleShutdownLogged_ = true;
+    }
+    return true;
 }
 
 // ---- 编码循环 ----

@@ -18,7 +18,12 @@ constexpr double kGravity = 9.80665;
 constexpr uint64_t kVisualFrameIntervalUs = 66666;  // 最多约 15 FPS，避免影响三路视频采集。
 constexpr uint64_t kImuStationaryHoldUs = 250000;
 constexpr double kVisualStationaryFlowPx = 0.85;
-constexpr double kVisualAnchorStationaryFlowPx = 1.50;
+constexpr double kVisualMotionFlowPx = 1.00;
+constexpr int kVisualFeatureTarget = 850;
+constexpr size_t kVisualFeatureRefreshFloor = 300;
+constexpr double kVisualFeatureQuality = 0.0045;
+constexpr double kVisualFeatureMinDistancePx = 5.0;
+constexpr double kOpticalFlowForwardBackwardMaxPx = 1.60;
 constexpr double kGyroStationaryThresholdRad = 0.028;
 constexpr double kAccelStationaryTolerance = 0.45;
 constexpr double kGyroBiasBootstrapMaxRad = 0.20;
@@ -28,9 +33,12 @@ constexpr double kVisualRotationMinFlowPx = 1.10;
 constexpr double kVisualRotationMaxDeg = 20.0;
 constexpr double kMinimumVisualImuTranslation = 0.00015;
 constexpr double kMaximumVisualImuTranslation = 0.035;
-constexpr double kVisualTranslationMinFlowPx = 1.05;
+constexpr double kVisualTranslationMinFlowPx = 0.75;
+constexpr double kVisualTranslationMinParallaxPx = 0.50;
+constexpr double kVisualTranslationStrongParallaxPx = 1.05;
+constexpr double kVisualTranslationMaxParallaxPx = 45.0;
 constexpr double kNominalVisualDepthM = 0.28;
-constexpr double kMaximumVisualTranslationPerFrameM = 0.018;
+constexpr double kMaximumVisualTranslationPerFrameM = 0.014;
 constexpr size_t kMaximumSparseVisualPoints = 96;
 constexpr int kOriginRelocalizeHoldFrames = 3;
 
@@ -65,6 +73,23 @@ double median(std::vector<double>& values) {
     const size_t middle = values.size() / 2;
     std::nth_element(values.begin(), values.begin() + middle, values.end());
     return values[middle];
+}
+
+void detectVisualFeatures(const cv::Mat& gray, std::vector<cv::Point2f>& points) {
+    points.clear();
+    if (gray.empty()) return;
+    try {
+        cv::goodFeaturesToTrack(
+            gray, points, kVisualFeatureTarget, kVisualFeatureQuality,
+            kVisualFeatureMinDistancePx, cv::noArray(), 3, false, 0.04);
+        if (!points.empty()) {
+            cv::cornerSubPix(
+                gray, points, cv::Size(3, 3), cv::Size(-1, -1),
+                cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 20, 0.02));
+        }
+    } catch (const cv::Exception&) {
+        points.clear();
+    }
 }
 
 std::vector<std::array<float, 3>> buildSparseVisualCloud(
@@ -123,6 +148,7 @@ public:
                 state_.mode = state_.connected ? "imu" : "offline";
                 visualStationary_ = false;
                 visualStationaryFrames_ = 0;
+                visualMovement_ = false;
             }
         }
         if (!connected) {
@@ -148,39 +174,11 @@ public:
             resetVisualState_ = true;
             imuStationary_ = false;
             visualStationary_ = false;
+            visualMovement_ = false;
             imuStationarySinceUs_ = 0;
             visualStationaryFrames_ = 0;
         } else {
             resetPoseLocked();
-        }
-    }
-
-    bool isCooperativeAvailable() const {
-        std::lock_guard<std::mutex> lock(stateMutex_);
-        return state_.connected && state_.cameraConnected && state_.hasImu;
-    }
-
-    bool isStronglyStationary() const {
-        std::lock_guard<std::mutex> lock(stateMutex_);
-        return state_.connected && state_.cameraConnected && state_.hasImu
-            && imuStationary_ && visualStationary_;
-    }
-
-    void setCooperativeConstraint(bool active) {
-        cooperativeConstraint_.store(active);
-        std::lock_guard<std::mutex> lock(stateMutex_);
-        state_.cooperativeConstraint = active;
-        if (active) {
-            velocity_.setZero();
-            pendingImuDelta_.setZero();
-            state_.quality = std::max(state_.quality, 0.9f);
-            state_.mode = state_.originRelocalized
-                ? "visual_imu_anchor"
-                : (state_.hasVisual ? "visual_imu_cooperative" : "imu");
-        } else if (state_.connected) {
-            state_.mode = state_.originRelocalized
-                ? "visual_imu_anchor"
-                : (state_.hasVisual ? "visual_imu" : (state_.hasImu ? "imu" : "initializing"));
         }
     }
 
@@ -247,8 +245,14 @@ public:
         // 新版夹爪固件完成校准后仍可能保留数度每秒的固定零偏。启动阶段先在
         // 重力稳定的短窗口内求平均，避免视觉线程较早启动时与校准条件相互等待。
         // 后续温漂学习仍要求视觉和 IMU 同时静止，不会吞掉正常的缓慢转动。
+        // 有相机时要求视觉也确认静止，避免用户启动后缓慢转动夹爪时把真实
+        // 角速度学习成零偏。极小零偏或无相机模式仍可独立完成初始化。
+        const bool visualBootstrapReady = !state_.cameraConnected
+            || visualStationary_
+            || rawGyro.norm() < kGyroStationaryThresholdRad;
         const bool bootstrapCandidate = accelStable
-            && rawGyro.norm() < kGyroBiasBootstrapMaxRad;
+            && rawGyro.norm() < kGyroBiasBootstrapMaxRad
+            && visualBootstrapReady;
         if (!gyroBiasInitialized_) {
             if (bootstrapCandidate) {
                 gyroBiasAccumulator_ += rawGyro;
@@ -279,6 +283,10 @@ public:
             imuStationarySinceUs_ = 0;
             imuStationary_ = false;
         }
+        // 匀速平移时加速度和角速度都可能接近静止值。此时必须允许本手相机
+        // 检测到的画面运动解除静止状态，否则模型有姿态却不会产生位置轨迹。
+        const bool motionStationary = imuStationary_
+            && (!state_.cameraConnected || !visualMovement_);
 
         if (accelNorm > 0.75 * kGravity && accelNorm < 1.25 * kGravity) {
             const Eigen::Vector3d measuredGravity = accel / accelNorm;
@@ -314,14 +322,14 @@ public:
             // measured x predicted 才会把估计姿态拉向实测重力；原方向相反会造成静止后仰。
             // 静止时快速拉回重力方向，抑制模型缓慢后仰；运动时降低增益，避免
             // 将线性加速度错误解释成姿态变化。偏航仍由陀螺仪和视觉共同约束。
-            const double correctionGain = imuStationary_ ? 3.6 : 0.32;
+            const double correctionGain = motionStationary ? 3.6 : 0.32;
             gyro += filteredGravityBody_.cross(predictedGravity) * correctionGain;
         }
 
         orientation_ = (orientation_ * deltaQuaternion(gyro, dt)).normalized();
         Eigen::Vector3d linearAccel = orientation_ * accel - Eigen::Vector3d(0.0, 0.0, kGravity);
         const Eigen::Vector3d previousVelocity = velocity_;
-        if (cooperativeConstraint_.load() || imuStationary_) {
+        if (motionStationary) {
             linearAccel.setZero();
             velocity_.setZero();
             pendingImuDelta_.setZero();
@@ -332,21 +340,18 @@ public:
             velocity_ += linearAccel * dt;
             if (velocity_.norm() > 0.8) velocity_ = velocity_.normalized() * 0.8;
         }
-        if (!imuStationary_) {
+        if (!motionStationary) {
             // 使用积分前速度，避免更新 velocity 后再次多算半个 a*dt^2。
             pendingImuDelta_ += previousVelocity * dt + 0.5 * linearAccel * dt * dt;
         }
         if (pendingImuDelta_.norm() > 0.06) pendingImuDelta_ = pendingImuDelta_.normalized() * 0.06;
 
         state_.sampleCount++;
-        state_.stationary = imuStationary_ && visualStationary_;
+        state_.stationary = motionStationary;
         publishOrientationLocked();
         if (!state_.hasVisual) {
             state_.mode = state_.cameraConnected ? "initializing" : "imu";
             state_.quality = state_.cameraConnected ? 0.3f : 0.2f;
-        } else if (cooperativeConstraint_.load()) {
-            state_.mode = "visual_imu_cooperative";
-            state_.quality = std::max(state_.quality, 0.9f);
         }
     }
 
@@ -400,8 +405,10 @@ private:
         imuStationary_ = false;
         visualStationaryFrames_ = 0;
         visualStationary_ = false;
+        visualMovement_ = false;
         originRelocalizeFrames_ = 0;
-        cooperativeConstraint_.store(false);
+        lastVisualDirection_.setZero();
+        lastVisualDirectionInitialized_ = false;
         state_.cooperativeConstraint = false;
     }
 
@@ -459,27 +466,50 @@ private:
             cv::GaussianBlur(gray, gray, cv::Size(3, 3), 0.6);
 
             if (previousGray.empty()) {
-                cv::goodFeaturesToTrack(gray, previousPoints, 650, 0.008, 7.0);
-                originOrb->detectAndCompute(gray, cv::noArray(), originKeypoints, originDescriptors);
+                detectVisualFeatures(gray, previousPoints);
                 previousGray = gray.clone();
                 continue;
             }
 
-            if (previousPoints.size() < 80) {
-                cv::goodFeaturesToTrack(previousGray, previousPoints, 650, 0.008, 7.0);
+            if (previousPoints.size() < kVisualFeatureRefreshFloor) {
+                detectVisualFeatures(previousGray, previousPoints);
+            }
+            if (previousPoints.empty()) {
+                previousGray = gray.clone();
+                continue;
             }
 
             std::vector<cv::Point2f> currentPoints;
             std::vector<unsigned char> opticalStatus;
             std::vector<float> opticalError;
-            cv::calcOpticalFlowPyrLK(previousGray, gray, previousPoints, currentPoints,
-                                     opticalStatus, opticalError, cv::Size(21, 21), 3);
+            cv::calcOpticalFlowPyrLK(
+                previousGray, gray, previousPoints, currentPoints,
+                opticalStatus, opticalError, cv::Size(25, 25), 4,
+                cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 30, 0.01));
+
+            // 用前后向光流一致性剔除曝光变化、遮挡和错误匹配。单向 LK 在鱼眼
+            // 边缘很容易产生稳定但错误的流向，持续积分后会直接表现为轨迹漂移。
+            std::vector<cv::Point2f> backwardPoints;
+            std::vector<unsigned char> backwardStatus;
+            std::vector<float> backwardError;
+            if (!currentPoints.empty()) {
+                cv::calcOpticalFlowPyrLK(
+                    gray, previousGray, currentPoints, backwardPoints,
+                    backwardStatus, backwardError, cv::Size(25, 25), 4,
+                    cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 30, 0.01));
+            }
 
             std::vector<cv::Point2f> trackedPrevious;
             std::vector<cv::Point2f> trackedCurrent;
             std::vector<double> flows;
             for (size_t i = 0; i < opticalStatus.size(); ++i) {
                 if (!opticalStatus[i] || opticalError[i] > 35.0f) continue;
+                if (i >= backwardStatus.size() || !backwardStatus[i]
+                    || i >= backwardPoints.size()
+                    || cv::norm(backwardPoints[i] - previousPoints[i])
+                        > kOpticalFlowForwardBackwardMaxPx) {
+                    continue;
+                }
                 const cv::Point2f& point = currentPoints[i];
                 if (point.x < 2 || point.y < 2 || point.x >= gray.cols - 2 || point.y >= gray.rows - 2) continue;
                 trackedPrevious.push_back(previousPoints[i]);
@@ -504,17 +534,43 @@ private:
                 }
                 // 15 FPS 下连续 4 帧约为 267 ms，可过滤单帧光流偶然抖动。
                 visualStationary_ = visualStationaryFrames_ >= 4;
+                visualMovement_ = trackedCurrent.size() >= 30
+                    && medianFlow > kVisualMotionFlowPx;
                 // 鱼眼边缘和曝光变化会让完全静止画面仍产生少量光流。只要 IMU
                 // 已稳定且光流没有达到明确运动量，就允许冻结位置并尝试原点匹配。
-                locallyStationary = imuStationary_
-                    && (visualStationary_ || medianFlow <= kVisualAnchorStationaryFlowPx);
+                locallyStationary = imuStationary_ && !visualMovement_;
                 state_.stationary = locallyStationary;
+            }
+
+            // 原点必须在单手真正静止后建立。过去直接使用相机首帧；若程序启动时
+            // 夹爪仍在手里移动，之后“放回原位”就永远无法匹配到那个错误首帧。
+            bool capturedOriginNow = false;
+            if (originDescriptors.empty() && locallyStationary && trackedCurrent.size() >= 40) {
+                std::vector<cv::KeyPoint> candidateKeypoints;
+                cv::Mat candidateDescriptors;
+                originOrb->detectAndCompute(
+                    gray, cv::noArray(), candidateKeypoints, candidateDescriptors);
+                if (candidateDescriptors.rows >= 36) {
+                    originKeypoints = std::move(candidateKeypoints);
+                    originDescriptors = candidateDescriptors.clone();
+                    capturedOriginNow = true;
+                    std::lock_guard<std::mutex> lock(stateMutex_);
+                    position_.setZero();
+                    velocity_.setZero();
+                    pendingImuDelta_.setZero();
+                    referenceOrientation_ = orientation_;
+                    visualOrientation_ = orientation_;
+                    visualOrientationInitialized_ = true;
+                    state_.x = 0.0;
+                    state_.y = 0.0;
+                    state_.z = 0.0;
+                }
             }
 
             // 只有设备已静止时才尝试与重置时的首帧匹配。匹配成功说明相机
             // 回到了初始视野，可安全消除单目尺度和 IMU 积分留下的闭环误差。
-            bool originMatched = false;
-            if (locallyStationary && originDescriptors.rows >= 36) {
+            bool originMatched = capturedOriginNow;
+            if (!capturedOriginNow && locallyStationary && originDescriptors.rows >= 36) {
                 std::vector<cv::KeyPoint> currentKeypoints;
                 cv::Mat currentDescriptors;
                 originOrb->detectAndCompute(gray, cv::noArray(), currentKeypoints, currentDescriptors);
@@ -556,10 +612,10 @@ private:
                                 relativeAngleDeg = 2.0 * std::acos(clampValue(
                                     std::fabs(relative.w()), 0.0, 1.0)) * 180.0 / M_PI;
                             }
-                            originMatched = inliers >= 26
-                                && inlierRatio >= 0.62
-                                && anchorDisplacement <= 24.0
-                                && relativeAngleDeg <= 18.0;
+                            originMatched = inliers >= 24
+                                && inlierRatio >= 0.58
+                                && anchorDisplacement <= 32.0
+                                && relativeAngleDeg <= 22.0;
                         }
                     } catch (const cv::Exception&) {
                         originMatched = false;
@@ -591,18 +647,19 @@ private:
             bool visualUpdated = false;
             int inlierCount = 0;
             if (trackedPrevious.size() >= 30) {
-                const cv::Point2d principal(gray.cols * 0.5, gray.rows * 0.5);
-                cv::Mat inlierMask;
-                cv::Mat essential = cv::findEssentialMat(
-                    trackedPrevious, trackedCurrent, focal, principal,
-                    cv::RANSAC, 0.999, 1.6, inlierMask);
+                try {
+                    const cv::Point2d principal(gray.cols * 0.5, gray.rows * 0.5);
+                    cv::Mat inlierMask;
+                    cv::Mat essential = cv::findEssentialMat(
+                        trackedPrevious, trackedCurrent, focal, principal,
+                        cv::RANSAC, 0.999, 1.6, inlierMask);
 
-                if (!essential.empty()) {
-                    cv::Mat rotationCv;
-                    cv::Mat translationCv;
-                    inlierCount = cv::recoverPose(
-                        essential, trackedPrevious, trackedCurrent,
-                        rotationCv, translationCv, focal, principal, inlierMask);
+                    if (!essential.empty()) {
+                        cv::Mat rotationCv;
+                        cv::Mat translationCv;
+                        inlierCount = cv::recoverPose(
+                            essential, trackedPrevious, trackedCurrent,
+                            rotationCv, translationCv, focal, principal, inlierMask);
 
                     if (inlierCount >= 24) {
                         Eigen::Matrix3d relativeRotation;
@@ -620,6 +677,38 @@ private:
                         relativeCameraRotation.normalize();
                         const double visualRotationDeg = 2.0 * std::acos(clampValue(
                             std::fabs(relativeCameraRotation.w()), 0.0, 1.0)) * 180.0 / M_PI;
+
+                        // 从总光流中减去 recoverPose 得到的纯旋转投影。剩余视差才
+                        // 能作为平移证据，避免原地偏航时沿任意方向画出假轨迹。
+                        std::vector<double> parallaxFlows;
+                        parallaxFlows.reserve(trackedPrevious.size());
+                        cv::Mat flatPoseMask;
+                        const unsigned char* poseMask = nullptr;
+                        size_t poseMaskSize = 0;
+                        if (!inlierMask.empty()) {
+                            flatPoseMask = inlierMask.reshape(1, 1);
+                            if (!flatPoseMask.isContinuous()) flatPoseMask = flatPoseMask.clone();
+                            poseMask = flatPoseMask.ptr<unsigned char>(0);
+                            poseMaskSize = flatPoseMask.total();
+                        }
+                        for (size_t index = 0; index < trackedPrevious.size(); ++index) {
+                            if (poseMask && (index >= poseMaskSize || poseMask[index] == 0)) continue;
+                            Eigen::Vector3d ray(
+                                (trackedPrevious[index].x - principal.x) / focal,
+                                (trackedPrevious[index].y - principal.y) / focal,
+                                1.0);
+                            const Eigen::Vector3d rotatedRay = relativeRotation * ray;
+                            if (rotatedRay.z() <= 0.1) continue;
+                            const cv::Point2f predicted(
+                                static_cast<float>(rotatedRay.x() / rotatedRay.z() * focal + principal.x),
+                                static_cast<float>(rotatedRay.y() / rotatedRay.z() * focal + principal.y));
+                            const double residual = cv::norm(trackedCurrent[index] - predicted);
+                            if (std::isfinite(residual)) parallaxFlows.push_back(residual);
+                        }
+                        const double translationParallax = median(parallaxFlows);
+                        bool translationReliable = parallaxFlows.size() >= 24
+                            && translationParallax >= kVisualTranslationMinParallaxPx
+                            && translationParallax <= kVisualTranslationMaxParallaxPx;
 
                         std::lock_guard<std::mutex> lock(stateMutex_);
                         if (!visualOrientationInitialized_) {
@@ -642,19 +731,26 @@ private:
                         Eigen::Vector3d visualDirection = -relativeRotation.transpose() * translation;
                         if (visualDirection.norm() > 1e-8) visualDirection.normalize();
                         visualDirection = orientationBefore * visualDirection;
+                        if (translationReliable && lastVisualDirectionInitialized_
+                            && visualDirection.dot(lastVisualDirection_) > 0.35) {
+                            visualDirection = (lastVisualDirection_ * 0.55
+                                + visualDirection * 0.45).normalized();
+                        }
 
                         Eigen::Vector3d imuDelta = pendingImuDelta_;
                         pendingImuDelta_.setZero();
                         const double imuScale = imuDelta.norm();
                         const double visualScale = clampValue(
-                            medianFlow / focal * kNominalVisualDepthM,
+                            translationParallax / focal * kNominalVisualDepthM,
                             0.0, kMaximumVisualTranslationPerFrameM);
                         double scale = imuScale;
-                        if (cooperativeConstraint_.load() || locallyStationary || originRelocalizedNow) {
-                            // 单手静止即可冻结位置；双手约束用于进一步提高静止判定可信度。
+                        if (locallyStationary || originRelocalizedNow) {
+                            // 单手 IMU 一旦确认静止就硬冻结该手的位置。即使另一只手
+                            // 在运动，或静止画面因曝光变化产生光流，也不能推动本轨迹。
                             scale = 0.0;
                             velocity_.setZero();
-                        } else if (medianFlow >= kVisualTranslationMinFlowPx
+                        } else if (translationReliable
+                                   && medianFlow >= kVisualTranslationMinFlowPx
                                    && imuScale >= kMinimumVisualImuTranslation
                                    && imuScale <= kMaximumVisualImuTranslation) {
                             if (visualDirection.dot(imuDelta) < 0.0) visualDirection = -visualDirection;
@@ -663,15 +759,20 @@ private:
                             // IMU 提供米制尺度，视觉光流补足低速移动时被积分死区吞掉的位移。
                             scale = clampValue(imuScale * 0.65 + visualScale * 0.35,
                                                0.0, kMaximumVisualTranslationPerFrameM);
-                        } else if (medianFlow >= kVisualTranslationMinFlowPx) {
+                        } else if (translationReliable
+                                   && translationParallax >= kVisualTranslationStrongParallaxPx) {
                             // 匀速或缓慢移动时加速度接近零，纯 IMU 无法给出尺度。此时采用
-                            // 保守名义工作距离恢复相对位移；静止门限会阻止纹理噪声累积。
-                            scale = visualScale * 0.72;
+                            // 更保守的名义尺度；旋转补偿后的强视差门限会阻止纹理噪声累积。
+                            scale = visualScale * 0.58;
                         } else {
                             scale = 0.0;
                         }
 
-                        position_ += visualDirection * scale;
+                        if (scale > 0.0 && translationReliable) {
+                            position_ += visualDirection * scale;
+                            lastVisualDirection_ = visualDirection;
+                            lastVisualDirectionInitialized_ = true;
+                        }
                         state_.x = position_.x();
                         state_.y = position_.y();
                         state_.z = position_.z();
@@ -679,36 +780,44 @@ private:
                         state_.hasVisual = true;
                         state_.valid = state_.connected;
                         state_.visualFeatures = inlierCount;
-                        state_.quality = cooperativeConstraint_.load()
-                            ? std::max(0.9f, static_cast<float>(clampValue(inlierCount / 100.0, 0.25, 1.0)))
-                            : static_cast<float>(clampValue(inlierCount / 100.0, 0.25, 1.0));
+                        state_.quality = static_cast<float>(clampValue(
+                            inlierCount / 100.0, 0.25, 1.0));
                         state_.mode = originRelocalizedNow
                             ? "visual_imu_anchor"
-                            : (cooperativeConstraint_.load()
-                                ? "visual_imu_cooperative"
-                                : "visual_imu");
-                        state_.cooperativeConstraint = cooperativeConstraint_.load();
+                            : "visual_imu";
+                        state_.cooperativeConstraint = false;
                         state_.sampleCount++;
                         publishOrientationLocked();
                         visualUpdated = true;
+                        }
                     }
+                } catch (const cv::Exception&) {
+                    // 纹理不足、纯旋转或鱼眼边缘退化都可能令本质矩阵求解失败。
+                    // 丢弃单帧即可，不能让某只手的视觉线程退出或影响另一只手。
+                    inlierCount = 0;
                 }
             }
 
             {
                 std::lock_guard<std::mutex> lock(stateMutex_);
                 if (!visualUpdated && state_.connected) {
+                    // 不把多帧未校验的惯性位移留到下一次视觉恢复时一次性应用。
+                    // 这样丢纹理后重新看到特征不会发生明显的位置跳变。
+                    if (locallyStationary) {
+                        pendingImuDelta_.setZero();
+                        velocity_.setZero();
+                    } else {
+                        pendingImuDelta_ *= 0.35;
+                    }
                     state_.visualFeatures = static_cast<int>(trackedCurrent.size());
                     if (visualStationary_) {
                         // 静止画面无法稳定恢复本质矩阵，但连续低光流本身仍是有效视觉约束。
                         state_.hasVisual = true;
                         state_.mode = originRelocalizedNow
                             ? "visual_imu_anchor"
-                            : (cooperativeConstraint_.load()
-                                ? "visual_imu_cooperative"
-                                : "visual_imu");
-                        state_.cooperativeConstraint = cooperativeConstraint_.load();
-                        state_.quality = cooperativeConstraint_.load() ? 0.9f : 0.55f;
+                            : "visual_imu";
+                        state_.cooperativeConstraint = false;
+                        state_.quality = 0.55f;
                     } else {
                         state_.hasVisual = false;
                         state_.mode = state_.hasImu ? "imu" : "initializing";
@@ -718,10 +827,10 @@ private:
                 }
             }
 
-            if (trackedCurrent.size() >= 80) {
+            if (trackedCurrent.size() >= kVisualFeatureRefreshFloor) {
                 previousPoints = std::move(trackedCurrent);
             } else {
-                cv::goodFeaturesToTrack(gray, previousPoints, 650, 0.008, 7.0);
+                detectVisualFeatures(gray, previousPoints);
             }
             previousGray = gray.clone();
         }
@@ -752,8 +861,10 @@ private:
     bool imuStationary_ = false;
     int visualStationaryFrames_ = 0;
     bool visualStationary_ = false;
+    bool visualMovement_ = false;
     int originRelocalizeFrames_ = 0;
-    std::atomic<bool> cooperativeConstraint_{false};
+    Eigen::Vector3d lastVisualDirection_ = Eigen::Vector3d::Zero();
+    bool lastVisualDirectionInitialized_ = false;
 
     std::mutex frameMutex_;
     std::condition_variable frameCv_;
@@ -775,22 +886,6 @@ HandPoseManager::~HandPoseManager() = default;
 HandPoseManager::Tracker* HandPoseManager::trackerForSide(const std::string& side) const {
     auto it = trackers_.find(side);
     return it == trackers_.end() ? nullptr : it->second.get();
-}
-
-void HandPoseManager::refreshCooperativeConstraintLocked() {
-    Tracker* left = trackerForSide("left");
-    Tracker* right = trackerForSide("right");
-    const bool available = left && right
-        && left->isCooperativeAvailable()
-        && right->isCooperativeAvailable();
-    const bool active = available
-        && left->isStronglyStationary()
-        && right->isStronglyStationary();
-
-    cooperativeAvailable_.store(available);
-    cooperativeActive_.store(active);
-    if (left) left->setCooperativeConstraint(active);
-    if (right) right->setCooperativeConstraint(active);
 }
 
 void HandPoseManager::setMapping(const std::string& side,
@@ -823,8 +918,6 @@ void HandPoseManager::setMapping(const std::string& side,
         }
         fprintf(stderr, "[位姿] %s手映射: 相机=%s, 夹爪=%s\n",
                 side.c_str(), cameraSlot.c_str(), gripperSlot.c_str());
-        std::lock_guard<std::mutex> lock(mappingMutex_);
-        refreshCooperativeConstraintLocked();
     }
 }
 
@@ -836,55 +929,67 @@ HandPoseMapping HandPoseManager::getMapping(const std::string& side) const {
 
 void HandPoseManager::setCameraConnected(const std::string& cameraSlot, bool connected) {
     if (!enabled_) return;
-    std::lock_guard<std::mutex> lock(mappingMutex_);
-    cameraConnections_[cameraSlot] = connected;
-    for (const auto& item : mappings_) {
-        if (item.second.cameraSlot == cameraSlot) {
-            Tracker* tracker = trackerForSide(item.first);
-            if (tracker) tracker->setCameraConnected(connected);
+    std::vector<Tracker*> targets;
+    {
+        std::lock_guard<std::mutex> lock(mappingMutex_);
+        cameraConnections_[cameraSlot] = connected;
+        for (const auto& item : mappings_) {
+            if (item.second.cameraSlot == cameraSlot) {
+                Tracker* tracker = trackerForSide(item.first);
+                if (tracker) targets.push_back(tracker);
+            }
         }
     }
-    refreshCooperativeConstraintLocked();
+    for (Tracker* tracker : targets) tracker->setCameraConnected(connected);
 }
 
 void HandPoseManager::setGripperConnected(const std::string& gripperSlot, bool connected) {
     if (!enabled_) return;
-    std::lock_guard<std::mutex> lock(mappingMutex_);
-    gripperConnections_[gripperSlot] = connected;
-    for (const auto& item : mappings_) {
-        if (item.second.gripperSlot == gripperSlot) {
-            Tracker* tracker = trackerForSide(item.first);
-            if (tracker) tracker->setGripperConnected(connected);
+    std::vector<Tracker*> targets;
+    {
+        std::lock_guard<std::mutex> lock(mappingMutex_);
+        gripperConnections_[gripperSlot] = connected;
+        for (const auto& item : mappings_) {
+            if (item.second.gripperSlot == gripperSlot) {
+                Tracker* tracker = trackerForSide(item.first);
+                if (tracker) targets.push_back(tracker);
+            }
         }
     }
-    refreshCooperativeConstraintLocked();
+    for (Tracker* tracker : targets) tracker->setGripperConnected(connected);
 }
 
 void HandPoseManager::feedCameraFrame(const std::string& cameraSlot,
                                       const cv::Mat& frame,
                                       uint64_t timestampUs) {
     if (!enabled_) return;
-    std::lock_guard<std::mutex> lock(mappingMutex_);
-    for (const auto& item : mappings_) {
-        if (item.second.cameraSlot == cameraSlot) {
-            Tracker* tracker = trackerForSide(item.first);
-            if (tracker) tracker->pushFrame(frame, timestampUs);
+    std::vector<Tracker*> targets;
+    {
+        std::lock_guard<std::mutex> lock(mappingMutex_);
+        for (const auto& item : mappings_) {
+            if (item.second.cameraSlot == cameraSlot) {
+                Tracker* tracker = trackerForSide(item.first);
+                if (tracker) targets.push_back(tracker);
+            }
         }
     }
-    refreshCooperativeConstraintLocked();
+    for (Tracker* tracker : targets) tracker->pushFrame(frame, timestampUs);
 }
 
 void HandPoseManager::feedGripperState(const std::string& gripperSlot,
                                        const GripperState& state) {
     if (!enabled_) return;
-    std::lock_guard<std::mutex> lock(mappingMutex_);
-    for (const auto& item : mappings_) {
-        if (item.second.gripperSlot == gripperSlot) {
-            Tracker* tracker = trackerForSide(item.first);
-            if (tracker) tracker->feedImu(state);
+    std::vector<Tracker*> targets;
+    {
+        std::lock_guard<std::mutex> lock(mappingMutex_);
+        for (const auto& item : mappings_) {
+            if (item.second.gripperSlot == gripperSlot) {
+                Tracker* tracker = trackerForSide(item.first);
+                if (tracker) targets.push_back(tracker);
+            }
         }
     }
-    refreshCooperativeConstraintLocked();
+    for (Tracker* tracker : targets) tracker->feedImu(state);
 }
 
 bool HandPoseManager::getPose(const std::string& side, HandPoseState& out) const {
@@ -895,13 +1000,10 @@ bool HandPoseManager::getPose(const std::string& side, HandPoseState& out) const
 }
 
 void HandPoseManager::reset(const std::string& side) {
-    std::lock_guard<std::mutex> lock(mappingMutex_);
     if (side == "all") {
         for (const auto& item : trackers_) item.second->reset();
-        refreshCooperativeConstraintLocked();
         return;
     }
     Tracker* tracker = trackerForSide(side);
     if (tracker) tracker->reset();
-    refreshCooperativeConstraintLocked();
 }

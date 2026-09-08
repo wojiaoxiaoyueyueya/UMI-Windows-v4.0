@@ -146,7 +146,7 @@ End Function
 
 Sub StopStaleBackends()
     On Error Resume Next
-    Dim request
+    Dim request, exitCode
 
     ' Newer backends can release SDK and serial handles gracefully.
     Set request = CreateObject("WinHttp.WinHttpRequest.5.1")

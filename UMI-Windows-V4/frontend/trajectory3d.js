@@ -11,9 +11,11 @@ const START_OFFSETS = {
     right: new THREE.Vector3(0.11, 0, 0)
 };
 const MODEL_MAX_SIZE_M = 0.09;
-// STEP 几何的两侧夹指初始间距约 107.8 mm，每侧移动 53.5 mm 后机械端面闭合。
-const MODEL_JAW_TRAVEL = 53.5;
-const FALLBACK_JAW_TRAVEL_M = 0.062;
+// CAD 是打开状态的装配体。每个活动零件离中心面的距离不同，必须按自身
+// 几何计算安全行程，不能让所有零件统一移动 53.5 mm，否则连杆会穿过对侧。
+const MODEL_JAW_CLEARANCE = 1.2;
+const MODEL_JAW_TRAVEL_LIMIT = 52.0;
+const FALLBACK_JAW_TRAVEL_M = 0.060;
 const JAW_NODES = {
     negative: ['NAUO7', 'NAUO8', 'NAUO9', 'NAUO22', 'NAUO23'],
     positive: ['NAUO4', 'NAUO5', 'NAUO10', 'NAUO16', 'NAUO21']
@@ -23,6 +25,7 @@ const DEMO_MODE = new URLSearchParams(window.location.search).get('poseDemo') ==
 let active = false;
 let initialized = false;
 let pollTimer = null;
+let pollInFlight = false;
 let animationFrame = 0;
 let renderer = null;
 let scene = null;
@@ -66,7 +69,8 @@ function createHandView(side) {
         positionFilterInitialized: false,
         lastMappedPosition: new THREE.Vector3(),
         filteredPosition: new THREE.Vector3(),
-        lastPositionSample: 0
+        lastPositionSample: 0,
+        lastOriginRelocalized: false
     };
 }
 
@@ -339,16 +343,53 @@ function installHandModel(side) {
         installCameraRig(view, view.anchor, 1, true);
     }
 
-    JAW_NODES.negative.forEach(function(name) { registerJawNode(view, model, name, 1); });
-    JAW_NODES.positive.forEach(function(name) { registerJawNode(view, model, name, -1); });
+    view.anchor.updateMatrixWorld(true);
+    JAW_NODES.negative.forEach(function(name) {
+        registerJawNode(view, model, normalizer, name, 1);
+    });
+    JAW_NODES.positive.forEach(function(name) {
+        registerJawNode(view, model, normalizer, name, -1);
+    });
     colorJawNodes(view, COLORS[side]);
     setJawClosure(view, view.closure);
 }
 
-function registerJawNode(view, model, name, direction) {
+function registerJawNode(view, model, coordinateRoot, name, direction) {
     const node = model.getObjectByName(name);
     if (!node) return;
-    view.jawNodes.push({ node, baseX: node.position.x, direction });
+    const bounds = nodeBoundsInRoot(node, coordinateRoot);
+    const innerDistance = bounds.isEmpty()
+        ? MODEL_JAW_TRAVEL_LIMIT
+        : (direction < 0 ? bounds.min.x : -bounds.max.x);
+    const maxTravel = THREE.MathUtils.clamp(
+        innerDistance - MODEL_JAW_CLEARANCE,
+        0,
+        MODEL_JAW_TRAVEL_LIMIT
+    );
+    view.jawNodes.push({ node, baseX: node.position.x, direction, maxTravel, name });
+}
+
+function nodeBoundsInRoot(node, coordinateRoot) {
+    const bounds = new THREE.Box3();
+    const corner = new THREE.Vector3();
+    coordinateRoot.updateMatrixWorld(true);
+    node.traverse(function(object) {
+        if (!object.isMesh || !object.geometry) return;
+        if (!object.geometry.boundingBox) object.geometry.computeBoundingBox();
+        const box = object.geometry.boundingBox;
+        if (!box || box.isEmpty()) return;
+        for (let mask = 0; mask < 8; mask++) {
+            corner.set(
+                mask & 1 ? box.max.x : box.min.x,
+                mask & 2 ? box.max.y : box.min.y,
+                mask & 4 ? box.max.z : box.min.z
+            );
+            object.localToWorld(corner);
+            coordinateRoot.worldToLocal(corner);
+            bounds.expandByPoint(corner);
+        }
+    });
+    return bounds;
 }
 
 function colorJawNodes(view, color) {
@@ -378,7 +419,13 @@ function installFallbackModel(side) {
         jaw.position.set(direction * 0.075, 0.055, 0);
         group.add(jaw);
         view.modelMeshes.push(jaw);
-        view.jawNodes.push({ node: jaw, baseX: jaw.position.x, direction: -direction, fallback: true });
+        view.jawNodes.push({
+            node: jaw,
+            baseX: jaw.position.x,
+            direction: -direction,
+            maxTravel: FALLBACK_JAW_TRAVEL_M,
+            fallback: true
+        });
     });
     view.anchor.add(group);
     view.modelRoot = group;
@@ -390,9 +437,10 @@ function setJawClosure(view, closure) {
     const rawClosure = THREE.MathUtils.clamp(Number(closure) || 0, 0, 1);
     // 新版磁编码在机械端点通常保留约 2%~6% 余量，将有效区间映射到完整行程。
     view.closure = THREE.MathUtils.clamp((rawClosure - 0.02) / 0.92, 0, 1);
+    const easedClosure = view.closure * view.closure * (3 - 2 * view.closure);
     view.jawNodes.forEach(function(entry) {
-        const travel = entry.fallback ? FALLBACK_JAW_TRAVEL_M : MODEL_JAW_TRAVEL;
-        entry.node.position.x = entry.baseX + entry.direction * travel * view.closure;
+        entry.node.position.x = entry.baseX
+            + entry.direction * entry.maxTravel * easedClosure;
     });
 }
 
@@ -450,14 +498,18 @@ function resetTrajectory() {
 
 function clearTrails() {
     ['left', 'right'].forEach(function(side) {
-        const view = handViews[side];
-        view.trail = [];
-        view.lastSample = 0;
-        view.lastTrailTime = 0;
-        view.positionFilterInitialized = false;
-        view.lastPositionSample = 0;
-        updateTrailGeometry(view);
+        clearHandTrail(handViews[side]);
     });
+}
+
+function clearHandTrail(view) {
+    view.trail = [];
+    view.lastSample = 0;
+    view.lastTrailTime = 0;
+    view.positionFilterInitialized = false;
+    view.lastPositionSample = 0;
+    view.lastOriginRelocalized = false;
+    updateTrailGeometry(view);
 }
 
 function trimTrails() {
@@ -469,18 +521,21 @@ function trimTrails() {
 }
 
 async function pollPoses() {
-    if (!active) return;
+    if (!active || pollInFlight) return;
     if (DEMO_MODE) {
         updateFromPayload(createDemoPayload());
         return;
     }
+    pollInFlight = true;
     try {
         const response = await fetch('/api/hand-poses', { cache: 'no-store' });
         if (!response.ok) throw new Error('HTTP ' + response.status);
         const data = await response.json();
-        updateFromPayload(data);
+        if (active) updateFromPayload(data);
     } catch (error) {
-        updateOverall(false, '服务未连接');
+        if (active) updateOverall(false, '服务未连接');
+    } finally {
+        pollInFlight = false;
     }
 }
 
@@ -520,7 +575,7 @@ function createDemoPayload() {
     }
     return {
         enabled: true,
-        cooperative: { available: true, active: false, mode: 'dual_hand_zupt' },
+        cooperative: { available: false, active: false, mode: 'independent' },
         hands: { left: hand(0), right: hand(Math.PI) }
     };
 }
@@ -533,11 +588,7 @@ function updateFromPayload(payload) {
     updateHand('right', right);
     const count = Number(Boolean(left.connected)) + Number(Boolean(right.connected));
     updateOverall(count > 0, count > 0 ? ('跟踪中 · ' + count + ' 个夹爪') : '等待设备');
-    const cooperative = payload && payload.cooperative ? payload.cooperative : {};
-    setText(
-        'trajectoryCooperativeState',
-        cooperative.active ? '协同稳态' : (cooperative.available ? '双手就绪' : '等待双手')
-    );
+    setText('trajectoryCooperativeState', '左右手独立');
     const frameLabel = byId('trajectoryFrameLabel');
     if (frameLabel) frameLabel.textContent = count > 0 ? '各手相对于本次启动或重置位置' : '等待跟踪数据';
     const empty = byId('trajectoryEmpty');
@@ -552,6 +603,8 @@ function updateHand(side, pose) {
     const view = handViews[side];
     const connected = Boolean(pose.connected);
     const valid = connected && Boolean(pose.valid);
+    const connectionChanged = view.connected !== connected;
+    if (connectionChanged) clearHandTrail(view);
     view.connected = connected;
     view.valid = valid;
 
@@ -590,8 +643,9 @@ function updateHand(side, pose) {
         -finiteNumber(sourcePosition[2])
     );
     const positionSample = Number(pose.sampleCount) || 0;
+    const originRelocalized = Boolean(pose.originRelocalized);
     const positionReset = !view.positionFilterInitialized
-        || Boolean(pose.originRelocalized)
+        || (originRelocalized && !view.lastOriginRelocalized)
         || (positionSample > 0 && view.lastPositionSample > 0
             && positionSample < view.lastPositionSample);
     if (positionReset) {
@@ -617,6 +671,7 @@ function updateHand(side, pose) {
         }
         view.filteredPosition.add(delta);
     }
+    view.lastOriginRelocalized = originRelocalized;
     view.lastPositionSample = positionSample;
     const position = view.filteredPosition.clone();
     const worldPosition = START_OFFSETS[side].clone().addScaledVector(position, positionDisplayScale);
@@ -681,12 +736,22 @@ function refreshHandVisibility(view) {
 
 function appendTrail(view, point, sample, timestampUs, stationary) {
     if (sample && sample === view.lastSample) return;
-    const previous = view.trail.length ? view.trail[view.trail.length - 1] : null;
-    if (stationary && previous) return;
-    const enoughMovement = !previous || previous.distanceToSquared(point) >= 0.000009;
-    const enoughTime = timestampUs && timestampUs - view.lastTrailTime >= 500000;
-    if (!enoughMovement && !enoughTime) return;
     view.lastSample = sample;
+    const previous = view.trail.length ? view.trail[view.trail.length - 1] : null;
+    if (!previous) {
+        const origin = START_OFFSETS[view.side].clone();
+        view.trail.push(origin);
+        if (origin.distanceToSquared(point) >= 0.00000004) view.trail.push(point.clone());
+        view.lastTrailTime = timestampUs;
+        updateTrailGeometry(view);
+        return;
+    }
+    if (stationary) return;
+    const movementSquared = previous.distanceToSquared(point);
+    const enoughMovement = movementSquared >= 0.00000064;
+    const visibleMovement = movementSquared >= 0.00000004;
+    const enoughTime = timestampUs && timestampUs - view.lastTrailTime >= 500000;
+    if (!enoughMovement && !(enoughTime && visibleMovement)) return;
     view.lastTrailTime = timestampUs;
     view.trail.push(point.clone());
     if (view.trail.length > trailLimit) view.trail.splice(0, view.trail.length - trailLimit);
@@ -724,7 +789,7 @@ function formatScale(value) {
 function modeLabel(mode, connected) {
     if (!connected) return '未接入';
     if (mode === 'visual_imu_anchor') return '原点重定位';
-    if (mode === 'visual_imu_cooperative') return '双手协同';
+    if (mode === 'visual_imu_cooperative') return '视觉 + IMU';
     if (mode === 'visual_imu') return '视觉 + IMU';
     if (mode === 'imu') return 'IMU';
     if (mode === 'initializing') return '初始化';

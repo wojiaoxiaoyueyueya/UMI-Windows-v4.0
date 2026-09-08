@@ -299,6 +299,10 @@ extra
 | `GET/POST /api/control` | 打开或关闭数据流 |
 | `GET /stream/:slot/:type` | MJPEG 视频流 |
 | `GET /api/fps` | 采集和预览帧率 |
+| `GET /api/system/status` | 启动器健康检查与服务身份确认 |
+| `POST /api/system/client/heartbeat` | 登记页面客户端并续期生命周期 |
+| `POST /api/system/client/release` | 页面关闭时释放客户端；最后一个页面释放后触发安全退出 |
+| `POST /api/system/shutdown` | 仅允许本机调用的显式安全退出接口 |
 | `GET /api/camera-controls` | 读取全部相机槽位参数 |
 | `POST /api/camera-controls/:slot` | 将参数应用到指定相机槽位 |
 | `GET /api/gripper/:slot` | 手动夹爪实时状态 |
@@ -336,7 +340,7 @@ extra
 4. 保存阶段可以异步排队，但不能改变原始采集时间戳。
 5. 新增字段后同步修改 metadata、CSV 表头、转换脚本和说明页面。
 6. 左右设备交换后，文件目录、CSV `slot` 字段和页面映射必须一致。
-7. 视觉惯性位姿保存到对应槽位的 `pose_data/trajectory.csv`，必须沿用会话微秒时间基准；双手协同约束状态写入 `cooperative_constraint`。
+7. 视觉惯性位姿保存到对应槽位的 `pose_data/trajectory.csv`，必须沿用会话微秒时间基准。左右手独立跟踪，不能用一只手的位置更新另一只手；`cooperative_constraint` 仅为旧数据结构兼容字段，在 4.4.1 中固定写入 `false`。
 
 修改录制代码后至少录制 10 秒测试数据，检查：
 
@@ -461,7 +465,8 @@ python tools/convert_gripper_step.py
 10. LeRobot、HDF5、RLDS 至少执行目标格式的最小转换测试。
 11. Edge/Chrome 页面无明显遮挡、控制台异常或资源 404。
 12. 空间位姿页只显示已连接夹爪，左右交换正确；分别测试左右、上下、前后和三轴旋转，模型方向一致且启动校准期间不会锁死。
-13. 完整闭合、真实鱼眼相机模型、镜头正向视锥、稀疏点云开关、动态取景、双手协同状态和 `pose_data/trajectory.csv` 正常。
+13. 完整闭合时夹指不穿模、真实鱼眼相机模型、镜头正向视锥、稀疏点云开关、动态取景和 `pose_data/trajectory.csv` 正常；单独移动任意一只手时，另一只手的模型和轨迹不得被联动更新。
+14. 页面正常关闭后约 3 秒后台退出；仅发送一次心跳后等待 20 秒后台仍应存活；拔出任意相机或夹爪时后台不得退出，设备线程异常不得终止整个进程。
 
 没有连接对应硬件时，应在提交说明中明确写出未覆盖的实机测试项。
 

@@ -47,6 +47,7 @@ struct HandPoseState {
     std::vector<std::array<float, 3>> visualPointCloud;
     bool stationary = false;
     bool originRelocalized = false;
+    // 兼容既有 API/CSV 字段。当前跟踪器按左右手完全独立工作，始终为 false。
     bool cooperativeConstraint = false;
     std::string mode = "offline";
 };
@@ -80,17 +81,15 @@ public:
                           const GripperState& state);
 
     bool getPose(const std::string& side, HandPoseState& out) const;
-    bool isCooperativeAvailable() const { return cooperativeAvailable_.load(); }
-    bool isCooperativeActive() const { return cooperativeActive_.load(); }
+    // 保留接口以兼容已有前端和数据文件；双手不再互相施加运动约束。
+    bool isCooperativeAvailable() const { return false; }
+    bool isCooperativeActive() const { return false; }
     void reset(const std::string& side);
 
 private:
     class Tracker;
 
     Tracker* trackerForSide(const std::string& side) const;
-    // 调用方持有 mappingMutex_ 时刷新双手协同状态。仅当双手的 IMU 与视觉
-    // 同时确认静止时才启用约束，避免给正常的双手独立运动施加错误距离限制。
-    void refreshCooperativeConstraintLocked();
     std::map<std::string, HandPoseMapping> mappings_;
     std::map<std::string, std::unique_ptr<Tracker>> trackers_;
     // 保存物理槽位的最新连接状态。映射交换后立即按新槽位刷新跟踪器，
@@ -98,7 +97,5 @@ private:
     std::map<std::string, bool> cameraConnections_;
     std::map<std::string, bool> gripperConnections_;
     mutable std::mutex mappingMutex_;
-    std::atomic<bool> cooperativeAvailable_{false};
-    std::atomic<bool> cooperativeActive_{false};
     bool enabled_;
 };

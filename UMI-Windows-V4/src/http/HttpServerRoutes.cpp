@@ -1311,7 +1311,7 @@ void HttpServer::setupMultiCameraRoutes() {
             << ",\"unit\":\"meter\""
             << ",\"cooperative\":{\"available\":" << handPoseManager_->isCooperativeAvailable()
             << ",\"active\":" << handPoseManager_->isCooperativeActive()
-            << ",\"mode\":\"dual_hand_zupt\"}"
+            << ",\"mode\":\"independent\"}"
             << ",\"mappings\":{"
             << "\"left\":{\"camera\":\"" << leftMapping.cameraSlot
             << "\",\"gripper\":\"" << leftMapping.gripperSlot << "\"},"

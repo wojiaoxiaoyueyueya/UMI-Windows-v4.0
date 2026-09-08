@@ -18,6 +18,7 @@
 #include <atomic>
 #include <algorithm>
 #include <chrono>
+#include <exception>
 #include <iostream>
 #include <cstdio>
 #include <map>
@@ -290,6 +291,7 @@ int main(int argc, char* argv[]) {
                 auto lastRecoveryAttempt = lastFrameTime;
                 std::string camSerial = cam->getSerialNumber();
                 int reconnectFailures = 0;
+                int workerErrors = 0;
                 auto waitWhileActive = [stopRequested](int totalMs) {
                     while (totalMs > 0) {
                         if (!g_running || stopRequested->load(std::memory_order_acquire)) return false;
@@ -302,6 +304,7 @@ int main(int argc, char* argv[]) {
                 fprintf(stderr, "[%s] 海康相机线程已启动 (SN: %s)\n", slotName.c_str(), camSerial.c_str());
 
                 while (g_running && !stopRequested->load(std::memory_order_acquire)) {
+                    try {
                     cv::Mat frame = cam->readColor();
                     if (stopRequested->load(std::memory_order_acquire)) break;
                     if (frame.empty()) {
@@ -353,6 +356,22 @@ int main(int argc, char* argv[]) {
                         std::chrono::steady_clock::now().time_since_epoch()).count();
                     if (shouldPublishColorFrame(server, slotName, now, lastTime, frameSkipMs)) {
                         server.updateColorFrame(slotName, frame);
+                    }
+                    workerErrors = 0;
+                    } catch (const std::exception& e) {
+                        ++workerErrors;
+                        if (workerErrors == 1 || workerErrors % 10 == 0) {
+                            fprintf(stderr, "[%s] 海康热插拔恢复异常，保留后台并继续重试: %s\n",
+                                    slotName.c_str(), e.what());
+                        }
+                        if (!waitWhileActive(250)) break;
+                    } catch (...) {
+                        ++workerErrors;
+                        if (workerErrors == 1 || workerErrors % 10 == 0) {
+                            fprintf(stderr, "[%s] 海康热插拔恢复出现未知异常，保留后台并继续重试\n",
+                                    slotName.c_str());
+                        }
+                        if (!waitWhileActive(250)) break;
                     }
                 }
                 fprintf(stderr, "[%s] 海康相机线程已停止 (SN: %s)\n", slotName.c_str(), camSerial.c_str());
@@ -517,7 +536,9 @@ int main(int argc, char* argv[]) {
     }
     std::thread hotplugThread([&]() {
         int refreshTick = 0;
+        int loopErrors = 0;
         while (g_running) {
+            try {
             refreshTick++;
             // SDK 枚举会访问 USB 控制器；空槽存在时也不应每两秒反复扫描，
             // 否则奥比插入或海康取流期间容易产生瞬时资源竞争。手动“重新扫描设备”不受影响。
@@ -566,6 +587,18 @@ int main(int argc, char* argv[]) {
                     || server.isStreamActive(slotName, "pointcloud") || irEnabled;
                 orbbec->setRequestedStreams(depthEnabled, irEnabled);
             }
+            loopErrors = 0;
+            } catch (const std::exception& e) {
+                ++loopErrors;
+                if (loopErrors == 1 || loopErrors % 10 == 0) {
+                    fprintf(stderr, "[热插拔] 设备刷新异常，后台保持运行并将在下一轮重试: %s\n", e.what());
+                }
+            } catch (...) {
+                ++loopErrors;
+                if (loopErrors == 1 || loopErrors % 10 == 0) {
+                    fprintf(stderr, "[热插拔] 设备刷新出现未知异常，后台保持运行并将在下一轮重试\n");
+                }
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
     });
@@ -573,8 +606,10 @@ int main(int argc, char* argv[]) {
     // ---- 5. 夹爪数据推送线程 ----
     std::thread gripperThread([&]() {
         int queryTick = 0;
+        int loopErrors = 0;
         std::map<std::string, uint64_t> lastPoseRecordedTimestamp;
         while (g_running) {
+            try {
             queryTick++;
             for (auto& slotName : deviceMgr.getGripperSlotNames()) {
                 auto* gslot = deviceMgr.getGripperSlot(slotName);
@@ -640,6 +675,18 @@ int main(int argc, char* argv[]) {
                     && lastPoseRecordedTimestamp[side] != pose.timestampUs) {
                     server.recordHandPose(side, pose);
                     lastPoseRecordedTimestamp[side] = pose.timestampUs;
+                }
+            }
+            loopErrors = 0;
+            } catch (const std::exception& e) {
+                ++loopErrors;
+                if (loopErrors == 1 || loopErrors % 50 == 0) {
+                    fprintf(stderr, "[夹爪线程] 设备读写异常，后台保持运行并继续等待重连: %s\n", e.what());
+                }
+            } catch (...) {
+                ++loopErrors;
+                if (loopErrors == 1 || loopErrors % 50 == 0) {
+                    fprintf(stderr, "[夹爪线程] 设备读写出现未知异常，后台保持运行并继续等待重连\n");
                 }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));

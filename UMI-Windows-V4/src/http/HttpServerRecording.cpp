@@ -876,7 +876,7 @@ bool HttpServer::finalizeRecording(std::string sessionId,
             else ofs << "null";
             ofs << ", \"frames\": " << ss.poseCount
                 << ", \"coordinateFrame\": \"relative_start\", \"unit\": \"meter\""
-                << ", \"cooperativeMode\": \"dual_hand_zupt\"}\n";
+                << ", \"trackingMode\": \"independent_per_hand\"}\n";
 
             ofs << "    }";
         }

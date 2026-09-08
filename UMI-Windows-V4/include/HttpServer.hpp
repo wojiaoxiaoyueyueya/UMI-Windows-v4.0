@@ -343,6 +343,8 @@ private:
     std::map<std::string, std::chrono::steady_clock::time_point> releasedClients_;
     std::chrono::steady_clock::time_point noClientSince_;
     bool clientTrackingStarted_ = false;
+    bool noClientAfterExplicitRelease_ = false;
+    bool lifecycleShutdownLogged_ = false;
     std::atomic<bool> explicitShutdownRequested_{false};
     void registerClientHeartbeat(const std::string& clientId);
     void releaseClient(const std::string& clientId);
